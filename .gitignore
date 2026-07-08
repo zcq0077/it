@@ -1,0 +1,28 @@
+@'
+# IDE / cache
+.idea/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# temp
+.tmp/
+tmp/
+
+# datasets and generated artifacts
+dataset/
+results/
+save_models/
+
+# large/generated files
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.pkl
+*.pt
+*.pth
+*.log
+*.png
+*.pdf
+'@ | Set-Content -Encoding UTF8 .gitignore
