@@ -6,6 +6,15 @@ import json
 import numpy as np
 import pandas as pd
 
+import sys
+
+try:
+    sys.modules.setdefault("numpy._core", np.core)
+    sys.modules.setdefault("numpy._core.multiarray", np.core.multiarray)
+    sys.modules.setdefault("numpy._core.umath", np.core.umath)
+except AttributeError:
+    pass
+
 
 def comma_list(value):
     return [item.strip() for item in value.split(",") if item.strip()]

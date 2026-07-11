@@ -6,6 +6,15 @@ import json
 import numpy as np
 import pandas as pd
 
+import sys
+
+try:
+    sys.modules.setdefault("numpy._core", np.core)
+    sys.modules.setdefault("numpy._core.multiarray", np.core.multiarray)
+    sys.modules.setdefault("numpy._core.umath", np.core.umath)
+except AttributeError:
+    pass
+
 from preprocess_dma_zip import DEFAULT_ROUTE_GATES, classify_route, get_route_gates
 
 

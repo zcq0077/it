@@ -258,14 +258,90 @@ class TrajModel(nn.Module):
 class iTentformer(nn.Module):
 
     def __init__(self, input_size_tcn, input_size, local_intent_size, output_size, concat_dim, input_length,
-                 num_channels, kernel_size, d_model, dropout):
+                 num_channels, kernel_size, d_model, dropout, subroute_classes=0,
+                 use_subroute_intent_head=False, use_subroute_embedding=False, subroute_embedding_dim=16,
+                 route_classes=0, use_route_intent_head=False, use_route_embedding=False, route_embedding_dim=16,
+                 use_hierarchical_intent=False, route_to_subroute_mask=None, hierarchical_mask_strength=1.0):
         super().__init__()
         self.TCN = TCN(input_size_tcn, local_intent_size, num_channels, kernel_size, dropout=dropout)
         self.TrajModel = TrajModel(input_size, d_model, output_size, concat_dim, input_length, dropout)
+        self.use_route_intent_head = use_route_intent_head and route_classes > 0
+        self.use_route_embedding = use_route_embedding and self.use_route_intent_head
+        self.route_classes = route_classes
+        self.use_subroute_intent_head = use_subroute_intent_head
+        self.use_subroute_embedding = use_subroute_embedding and use_subroute_intent_head and subroute_classes > 0
+        self.subroute_classes = subroute_classes
+        self.use_hierarchical_intent = (
+            use_hierarchical_intent
+            and self.use_route_intent_head
+            and self.use_subroute_intent_head
+            and subroute_classes > 0
+        )
+        self.hierarchical_mask_strength = hierarchical_mask_strength
+        feature_dim = num_channels[-1]
+
+        if self.use_route_intent_head:
+            self.route_head = nn.Sequential(
+                nn.LayerNorm(feature_dim),
+                nn.Linear(feature_dim, feature_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(feature_dim, route_classes),
+            )
+            if self.use_route_embedding:
+                self.route_embedding = nn.Embedding(route_classes, route_embedding_dim)
+                self.route_to_intent = nn.Linear(route_embedding_dim, feature_dim)
+
+        if self.use_subroute_intent_head:
+            self.subroute_head = nn.Sequential(
+                nn.LayerNorm(feature_dim),
+                nn.Linear(feature_dim, feature_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(feature_dim, subroute_classes),
+            )
+            if self.use_subroute_embedding:
+                self.subroute_embedding = nn.Embedding(subroute_classes, subroute_embedding_dim)
+                self.subroute_to_intent = nn.Linear(subroute_embedding_dim, feature_dim)
+
+        if route_to_subroute_mask is not None:
+            self.register_buffer("route_to_subroute_mask", route_to_subroute_mask.float())
+        else:
+            self.route_to_subroute_mask = None
 
     def forward(self, delta, src):
         intent = self.TCN(delta)
+        route_logits = None
+        route_feature = None
+        subroute_logits = None
+        subroute_feature = None
+        intent_feature = intent.mean(dim=1)
+
+        if self.use_route_intent_head:
+            route_feature = intent_feature
+            route_logits = self.route_head(route_feature)
+            if self.use_route_embedding:
+                route_prob = torch.softmax(route_logits, dim=-1)
+                route_emb = torch.matmul(route_prob, self.route_embedding.weight)
+                route_bias = self.route_to_intent(route_emb).unsqueeze(1)
+                intent = intent + route_bias
+
+        if self.use_subroute_intent_head:
+            subroute_feature = intent_feature
+            subroute_logits = self.subroute_head(subroute_feature)
+            if self.use_hierarchical_intent and self.route_to_subroute_mask is not None:
+                route_prob = torch.softmax(route_logits, dim=-1)
+                subroute_gate = torch.matmul(route_prob, self.route_to_subroute_mask).clamp_min(1e-6)
+                subroute_logits = subroute_logits + self.hierarchical_mask_strength * torch.log(subroute_gate)
+            if self.use_subroute_embedding:
+                subroute_prob = torch.softmax(subroute_logits, dim=-1)
+                subroute_emb = torch.matmul(subroute_prob, self.subroute_embedding.weight)
+                intent_bias = self.subroute_to_intent(subroute_emb).unsqueeze(1)
+                intent = intent + intent_bias
+
         out, _ = self.TrajModel(src.transpose(1, 2), intent)
         out_intent = self.TCN.linear_intent(intent)
 
+        if self.use_route_intent_head or self.use_subroute_intent_head:
+            return out_intent, out, route_logits, subroute_logits, route_feature, subroute_feature
         return out_intent, out

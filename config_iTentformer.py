@@ -8,15 +8,15 @@
 
     python iTentformer.py --epochs 1 --run_name smoke
 
-当前默认数据集是 2023 年 6 月 + 7 月 DMA 四类航路数据：
+当前默认数据集是 2023 年 6 月 + 7 月 + 8 月 DMA 四类航路数据：
 
     OA  : 从 O 区域到 A 区域的航路
     OB1 : 从 O 区域到 B1 区域的航路
     OB2 : 从 O 区域到 B2 区域的航路
     OC  : 从 O 区域到 C 区域的西侧竖向典型航路
 
-注意：这些航路类别目前主要用于分层划分训练/测试集、均衡抽图和日志统计；
-模型本身输入的仍然是 AIS 数值特征，不会直接把 OA/OB1/OB2/OC 当作类别喂进去。
+注意：这些航路类别不会作为输入特征直接喂给模型；
+但打开层级意图模块后，它们会作为辅助监督信号，帮助模型学习“大航路 -> 小分支 -> 未来轨迹”。
 """
 
 
@@ -27,25 +27,83 @@ class Config:
     # 模型要读取的 pkl 数据。里面每条轨迹已经处理成 iTentformer 需要的 15 列格式：
     # [MMSI, Length, Course, Lon, Lat, SOG, vx, vy,
     #  delta_Course, delta_Lon, delta_Lat, delta_SOG, delta_vx, delta_vy, UnixTime]
-    data_path = "dataset/dma_raw_2023_06_07/dma_itentformer_ti_4class_revnorm_lasthit.pkl"
+    data_path = "dataset/dma_raw_2023_06_07_08/dma_itentformer_ti_4class_revnorm_lasthit.pkl"
 
     # 每条轨迹对应的航路类别标签。当前包含 OA / OB1 / OB2 / OC 四类。
     # 这个文件不是模型输入特征，主要用于：
     # 1. K 折划分时尽量让每折都有各类航路；
     # 2. 测试集可视化时按类别均衡抽样；
     # 3. 日志里统计每类轨迹数量，方便检查数据是否偏。
-    route_labels_path = "dataset/dma_raw_2023_06_07/dma_route_labels_ti_4class_revnorm_lasthit.json"
+    route_labels_path = "dataset/dma_raw_2023_06_07_08/dma_route_labels_ti_4class_revnorm_lasthit.json"
 
     # True：按航路类别分层 K 折，推荐打开。
     # False：普通随机 K 折，可能出现某一折里某类航路很少。
     stratify_by_route = True
 
+    # 大类航路分类辅助头。模型会先学习当前历史轨迹更像 OA/OB1/OB2/OC 哪一类。
+    # 注意这里不是只看起点，而是看已观测历史段里的起点、当前位置、航向、速度和变化趋势。
+    use_route_intent_head = True
+    route_intent_weight = 0.2
+
+    # 大类航路 embedding 融合。打开后，大类概率会反馈给轨迹预测分支。
+    use_route_embedding = True
+    route_embedding_dim = 16
+
+    # 细分子航路标签，由 utils/discover_subroutes.py 生成。
+    # 它会把 OA/OB1/OB2/OC 继续细化为 OA_S00、OB1_S01、OC_S02 等小分支。
+    subroute_labels_path = "dataset/dma_raw_2023_06_07_08/dma_subroutes_ti_4class_local_fused_v4_labels.json"
+
+    # True：K 折划分时按子航路分层，比只按 OA/OB1/OB2/OC 更细。
+    # 如果子航路数量太多且某些类样本很少，可以改回 False。
+    stratify_by_subroute = True
+
+    # 子航路分类辅助头。打开后，模型训练时会同时学习“当前历史轨迹属于哪个小分支”。
+    use_subroute_intent_head = True
+    subroute_intent_weight = 0.35
+
+    # 子航路 embedding 融合。模型会把自己预测的子航路概率转成 embedding，
+    # 再融合回轨迹预测分支，让“像哪条小航路”真正影响未来轨迹预测。
+    use_subroute_embedding = True
+    subroute_embedding_dim = 16
+
+    # 层级意图约束。大类概率会约束小类概率：
+    # 例如大类更像 OA 时，OA_S00/OA_S01/OA_S02 会更容易被选中，OC_Sxx 会被压低。
+    # strength 越大约束越强；太大时如果大类判断错，会拖累小类，所以默认用温和强度。
+    use_hierarchical_intent = True
+    hierarchical_mask_strength = 1.5
+
+    # 子航路对比损失。同一子航路的隐藏特征会被拉近，不同子航路会被拉远。
+    use_subroute_contrastive_loss = True
+    subroute_contrastive_weight = 0.05
+    subroute_contrastive_temperature = 0.2
+
+    # Subroute focal loss: hard/rare branch windows get a little more gradient.
+    # Keep gamma modest; too large can make the model chase noisy branch labels.
+    use_subroute_focal_loss = True
+    subroute_focal_gamma = 1.5
+    subroute_label_smoothing = 0.02
+
+    # 子航路分类 class weight。只加在子航路分类辅助头上，不直接改变轨迹回归 loss。
+    # alpha 越大越照顾小类；0 表示不按频次加权，1 表示强逆频次加权。
+    # max_ratio 限制小类最多被照顾到多少倍，避免小类噪声把模型带偏。
+    use_subroute_class_weight = True
+    subroute_class_weight_alpha = 0.5
+    subroute_class_weight_max_ratio = 5.0
+
+    # 温和子航路均衡采样。每轮训练仍保持同样窗口数，只把其中一部分替换成按小类加权抽样。
+    # mix_ratio=0.3 表示约 70% 仍按原始分布训练，30% 用均衡抽样照顾小类。
+    use_balanced_subroute_sampling = True
+    balanced_sampling_alpha = 0.4
+    balanced_sampling_max_ratio = 5.0
+    balanced_sampling_mix_ratio = 0.4
+    # Current default: 60% natural windows + 40% subroute-balanced replacement.
+
     # ======================================================================
     # 2. 实验输出位置
     # ======================================================================
     # 保存模型文件时用的前缀。最终通常类似：
-    # save_models/dma_2023_06_07_ti_4class_K1.pt
-    model_prefix = "dma_2023_06_07_ti_4class"
+    # save_models/dma_2023_06_07_08_ti_4class_K1.pt
+    model_prefix = "dma_2023_06_07_08_ti_4class"
 
     # 模型 checkpoint 保存目录。
     model_dir = "save_models"
@@ -74,7 +132,7 @@ class Config:
 
     # eval_only=True 时加载的模型路径。
     # None：默认加载 model_dir/model_prefix_K当前折.pt。
-    # 例如："save_models/dma_2023_06_07_ti_4class_K1.pt"
+    # 例如："save_models/dma_2023_06_07_08_ti_4class_K1.pt"
     checkpoint_path = None
 
     # ======================================================================
@@ -96,11 +154,18 @@ class Config:
 
     # 早停耐心值：验证集连续多少轮不提升就停。
     # 小数据/调参可以设 3-5；正式训练可设 8-15。
-    patience = 5
+    patience = 10
+
+    # 早停和最佳模型保存的监控指标。
+    # loss：监控验证总 loss，适合单任务训练；
+    # ade：监控验证 ADE；
+    # ade_fde：监控 ADE + early_stop_fde_weight * FDE，更适合当前多任务轨迹预测。
+    early_stop_metric = "ade_fde"
+    early_stop_fde_weight = 0.2
 
     # 验证集比例。推荐用比例，不用再根据数据集大小手动改验证集数量。
     # 0.1 表示：每一折先分出测试集后，再从剩余训练候选轨迹里拿 10% 做验证集。
-    # 以当前 3254 条轨迹、5 折为例，每折训练候选约 2603 条，验证集约 260 条。
+    # 以当前 4854 条轨迹、5 折为例，每折训练候选约 3883 条，验证集约 388 条。
     valid_ratio = 0.1
 
     # 固定验证集条数。只有当 valid_ratio = None 时才会使用这个参数。
@@ -123,8 +188,9 @@ class Config:
     plot_dir = "plots"
 
     # first：直接画测试集前 plot_count 条；
-    # route_balanced：按 OA/OB1/OB2/OC 尽量均衡抽图，推荐。
-    plot_strategy = "route_balanced"
+    # route_balanced：按 OA/OB1/OB2/OC 尽量均衡抽图；
+    # subroute_balanced：按 OA_S00/OC_S01 等子航路尽量均衡抽图，适合检查细分分支。
+    plot_strategy = "subroute_balanced"
 
     # ======================================================================
     # 6. 预测目标形式

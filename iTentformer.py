@@ -70,6 +70,8 @@ criterion1 = nn.MSELoss().to(device)
 criterion2 = nn.CrossEntropyLoss().to(device)
 metric_haversine = HaversineLoss(min_hav=0.0).to(device)
 stable_haversine = HaversineLoss(min_hav=1e-7).to(device)
+subroute_class_weights = None
+train_sampling_probabilities = None
 
 
 def setup_logging(log_path, append=False):
@@ -274,7 +276,50 @@ def compose_value_output(raw_output, src):
     return raw_output
 
 
-def compute_objective(intent, intent_y, value_output, value_target):
+def supervised_contrastive_loss(features, labels, temperature):
+    if features is None or labels is None or features.size(0) < 2:
+        return torch.zeros((), device=device)
+    labels = labels.view(-1)
+    features = F.normalize(features, dim=1)
+    logits = torch.matmul(features, features.T) / temperature
+    self_mask = torch.eye(features.size(0), device=features.device, dtype=torch.bool)
+    logits = logits.masked_fill(self_mask, -1e9)
+    positive_mask = labels.unsqueeze(0).eq(labels.unsqueeze(1)) & ~self_mask
+    valid_anchor = positive_mask.any(dim=1)
+    if not valid_anchor.any():
+        return torch.zeros((), device=features.device)
+    log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+    positive_log_prob = (log_prob * positive_mask.float()).sum(dim=1) / positive_mask.float().sum(dim=1).clamp_min(1.0)
+    return -positive_log_prob[valid_anchor].mean()
+
+
+def focal_cross_entropy_loss(logits, target, class_weights=None, gamma=1.5, label_smoothing=0.0):
+    target = target.long()
+    ce_loss = F.cross_entropy(
+        logits,
+        target,
+        weight=class_weights,
+        reduction="none",
+        label_smoothing=label_smoothing,
+    )
+    log_probs = F.log_softmax(logits, dim=-1)
+    target_log_probs = log_probs.gather(1, target.view(-1, 1)).squeeze(1)
+    target_probs = torch.exp(target_log_probs).clamp(min=1e-6, max=1.0)
+    focal_weight = torch.pow(1.0 - target_probs, gamma)
+    return torch.mean(focal_weight * ce_loss)
+
+
+def compute_objective(
+        intent,
+        intent_y,
+        value_output,
+        value_target,
+        route_logits=None,
+        route_target=None,
+        subroute_logits=None,
+        subroute_target=None,
+        subroute_feature=None,
+):
     mse_loss = criterion1(value_output, value_target)
     intent = intent.reshape(-1, intent.size(-1))
     intent_y = intent_y.reshape(-1, intent_y.size(-1))
@@ -307,6 +352,37 @@ def compute_objective(intent, intent_y, value_output, value_target):
         cog_loss = torch.mean((cog_diff / args.cog_loss_scale) ** 2)
         loss = loss + args.cog_weight * cog_loss
 
+    if args.use_route_intent_head and route_logits is not None and route_target is not None:
+        route_loss = F.cross_entropy(route_logits, route_target.long())
+        loss = loss + args.route_intent_weight * route_loss
+
+    if args.use_subroute_intent_head and subroute_logits is not None and subroute_target is not None:
+        class_weights = subroute_class_weights if args.use_subroute_class_weight else None
+        if args.use_subroute_focal_loss:
+            subroute_loss = focal_cross_entropy_loss(
+                subroute_logits,
+                subroute_target,
+                class_weights=class_weights,
+                gamma=args.subroute_focal_gamma,
+                label_smoothing=args.subroute_label_smoothing,
+            )
+        else:
+            subroute_loss = F.cross_entropy(
+                subroute_logits,
+                subroute_target.long(),
+                weight=class_weights,
+                label_smoothing=args.subroute_label_smoothing,
+            )
+        loss = loss + args.subroute_intent_weight * subroute_loss
+
+        if args.use_subroute_contrastive_loss:
+            contrastive = supervised_contrastive_loss(
+                subroute_feature,
+                subroute_target,
+                args.subroute_contrastive_temperature,
+            )
+            loss = loss + args.subroute_contrastive_weight * contrastive
+
     return loss
 
 
@@ -323,6 +399,23 @@ def metric_tensors(value_output, value_target):
     return ade, fde, rmse_cog, rmse_sog, real_output, real_target
 
 
+def metric_to_float(value):
+    if torch.is_tensor(value):
+        return float(value.detach().cpu().item())
+    return float(value)
+
+
+def early_stop_monitor_value(vloss, vade, vfde):
+    if args.early_stop_metric == "loss":
+        return metric_to_float(vloss), "loss"
+    if args.early_stop_metric == "ade":
+        return metric_to_float(vade), "ADE"
+    if args.early_stop_metric == "ade_fde":
+        score = metric_to_float(vade) + args.early_stop_fde_weight * metric_to_float(vfde)
+        return score, f"ADE+{args.early_stop_fde_weight:.3f}*FDE"
+    raise ValueError(f"Unsupported early_stop_metric: {args.early_stop_metric}")
+
+
 def load_route_labels(path, expected_count):
     if not path:
         return None
@@ -333,6 +426,101 @@ def load_route_labels(path, expected_count):
     return [str(item["route"]) for item in labels]
 
 
+def load_label_field(path, expected_count, field):
+    if not path:
+        return None
+    with open(path, "r", encoding="utf-8") as handle:
+        labels = json.load(handle)
+    if len(labels) != expected_count:
+        raise ValueError(f"{field} labels count {len(labels)} does not match data count {expected_count}.")
+    result = []
+    for idx, item in enumerate(labels):
+        if isinstance(item, dict):
+            if field not in item:
+                raise ValueError(f"Missing field {field!r} in label item {idx}: {path}")
+            result.append(str(item[field]))
+        else:
+            result.append(str(item))
+    return result
+
+
+def build_label_encoder(labels):
+    if labels is None:
+        return None, None, None
+    classes = sorted(set(labels))
+    label_to_id = {label: idx for idx, label in enumerate(classes)}
+    ids = np.array([label_to_id[label] for label in labels], dtype=np.int64)
+    return classes, label_to_id, ids
+
+
+def route_name_from_subroute(subroute_name):
+    subroute_name = str(subroute_name)
+    if "_S" in subroute_name:
+        return subroute_name.split("_S", 1)[0]
+    return subroute_name.split("_", 1)[0]
+
+
+def build_route_to_subroute_mask(route_classes, subroute_classes):
+    if route_classes is None or subroute_classes is None:
+        return None
+    route_to_id = {route: idx for idx, route in enumerate(route_classes)}
+    mask = np.zeros((len(route_classes), len(subroute_classes)), dtype=np.float32)
+    for subroute_idx, subroute_name in enumerate(subroute_classes):
+        route_name = route_name_from_subroute(subroute_name)
+        if route_name not in route_to_id:
+            raise ValueError(f"Subroute {subroute_name!r} does not match any route class: {route_classes}")
+        mask[route_to_id[route_name], subroute_idx] = 1.0
+    return torch.tensor(mask, dtype=torch.float32, device=device)
+
+
+def inverse_frequency_values(label_ids, class_count, alpha, max_ratio):
+    label_ids = np.asarray(label_ids, dtype=np.int64)
+    weights = np.zeros(class_count, dtype=np.float32)
+    if len(label_ids) == 0:
+        return weights
+
+    counts = np.bincount(label_ids, minlength=class_count).astype(np.float32)
+    present = counts > 0
+    if not np.any(present):
+        return weights
+
+    max_count = float(np.max(counts[present]))
+    weights[present] = (max_count / counts[present]) ** alpha
+    weights[present] = np.minimum(weights[present], max_ratio)
+
+    sample_mean = float(np.mean(weights[label_ids]))
+    if sample_mean > 0:
+        weights[present] = weights[present] / sample_mean
+    return weights
+
+
+def make_subroute_class_weights(label_ids, class_count, alpha, max_ratio):
+    weights = inverse_frequency_values(label_ids, class_count, alpha, max_ratio)
+    if not np.any(weights > 0):
+        return None
+    return torch.tensor(weights, dtype=torch.float32, device=device)
+
+
+def make_balanced_sampling_probabilities(label_ids, class_count, alpha, max_ratio):
+    weights = inverse_frequency_values(label_ids, class_count, alpha, max_ratio)
+    if not np.any(weights > 0):
+        return None
+    sample_weights = weights[np.asarray(label_ids, dtype=np.int64)]
+    total = float(np.sum(sample_weights))
+    if total <= 0:
+        return None
+    return sample_weights / total
+
+
+def format_class_values(values, class_names, precision=3):
+    if values is None:
+        return "none"
+    result = []
+    for idx, value in enumerate(values):
+        result.append(f"{label_id_to_name(idx, class_names)}:{float(value):.{precision}f}")
+    return ", ".join(result)
+
+
 def expand_track_labels_to_windows(track_labels, window_slices):
     if track_labels is None:
         return None
@@ -340,6 +528,14 @@ def expand_track_labels_to_windows(track_labels, window_slices):
     for label, windows in zip(track_labels, window_slices):
         window_labels.extend([label] * len(windows))
     return np.array(window_labels)
+
+
+def unpack_model_output(model_output):
+    if len(model_output) == 2:
+        return model_output[0], model_output[1], None, None, None, None
+    if len(model_output) == 4:
+        return model_output[0], model_output[1], None, model_output[2], None, model_output[3]
+    return model_output[0], model_output[1], model_output[2], model_output[3], model_output[4], model_output[5]
 
 
 def choose_plot_indices(window_labels, max_samples, strategy, seed):
@@ -365,6 +561,32 @@ def choose_plot_indices(window_labels, max_samples, strategy, seed):
     return selected
 
 
+def label_id_to_name(label_id, class_names):
+    if label_id is None:
+        return None
+    label_id = int(label_id)
+    if class_names is None or label_id < 0 or label_id >= len(class_names):
+        return str(label_id)
+    return str(class_names[label_id])
+
+
+def sanitize_filename_part(value):
+    if value is None:
+        return ""
+    return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in str(value))
+
+
+def format_top_probs(probs, class_names, top_k=3):
+    if probs is None or probs.numel() == 0:
+        return None
+    top_k = min(top_k, probs.numel())
+    values, indices = torch.topk(probs, k=top_k)
+    parts = []
+    for prob, idx in zip(values.tolist(), indices.tolist()):
+        parts.append(f"{label_id_to_name(idx, class_names)}:{prob:.3f}")
+    return ";".join(parts)
+
+
 def load_model_checkpoint(checkpoint_path, current_model):
     try:
         loaded = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -378,31 +600,83 @@ def load_model_checkpoint(checkpoint_path, current_model):
     return current_model.to(device)
 
 
-def save_prediction_plots(X_data, fold, output_dir, max_samples, window_labels=None, plot_strategy="first"):
+def save_prediction_plots(
+        X_data,
+        fold,
+        output_dir,
+        max_samples,
+        window_labels=None,
+        plot_strategy="first",
+        window_route_ids=None,
+        route_classes=None,
+        window_subroute_ids=None,
+        subroute_classes=None,
+):
     if max_samples <= 0:
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
     model.eval()
-    plot_indices = choose_plot_indices(window_labels, min(max_samples, len(X_data)), plot_strategy, seed=fold * 1009)
+    sample_count = min(max_samples, len(X_data))
+    sampling_labels = window_labels
+    if plot_strategy == "subroute_balanced" and window_subroute_ids is not None:
+        sampling_labels = np.array([label_id_to_name(item, subroute_classes) for item in window_subroute_ids])
+    plot_indices = choose_plot_indices(sampling_labels, sample_count, plot_strategy, seed=fold * 1009)
+    diagnostics = []
 
     for plot_idx, sample_idx in enumerate(plot_indices):
         sample_data = X_data[sample_idx]
         route_label = None if window_labels is None else str(window_labels[sample_idx])
+        true_route_id = None
+        true_route = route_label
+        if window_route_ids is not None:
+            true_route_id = int(window_route_ids[sample_idx])
+            true_route = label_id_to_name(true_route_id, route_classes)
+        true_subroute_id = None
+        true_subroute = None
+        if window_subroute_ids is not None:
+            true_subroute_id = int(window_subroute_ids[sample_idx])
+            true_subroute = label_id_to_name(true_subroute_id, subroute_classes)
+
         delta = sample_data[:input_length, in_cols].unsqueeze(0).to(device)
         src = sample_data[:input_length, in_cols].unsqueeze(0).to(device)
+        value_target = sample_data[input_length:input_length + target_length, src_cols].unsqueeze(0).to(device)
 
         with torch.no_grad():
-            _, raw_output = model(delta, src)
+            _, raw_output, route_logits, subroute_logits, _, _ = unpack_model_output(model(delta, src))
             output = compose_value_output(raw_output, src)
+            sample_ade, sample_fde, sample_rmse_cog, sample_rmse_sog, real_output, real_target = metric_tensors(
+                output,
+                value_target,
+            )
 
-        pred = output.squeeze(0).detach().cpu().numpy()
+        pred_route_id = None
+        pred_route = None
+        pred_route_conf = None
+        top_route_probs = None
+        if route_logits is not None:
+            route_probs = F.softmax(route_logits, dim=-1).squeeze(0).detach().cpu()
+            pred_route_id = int(torch.argmax(route_probs).item())
+            pred_route = label_id_to_name(pred_route_id, route_classes)
+            pred_route_conf = float(route_probs[pred_route_id].item())
+            top_route_probs = format_top_probs(route_probs, route_classes)
+
+        pred_subroute_id = None
+        pred_subroute = None
+        pred_subroute_conf = None
+        top_subroute_probs = None
+        if subroute_logits is not None:
+            subroute_probs = F.softmax(subroute_logits, dim=-1).squeeze(0).detach().cpu()
+            pred_subroute_id = int(torch.argmax(subroute_probs).item())
+            pred_subroute = label_id_to_name(pred_subroute_id, subroute_classes)
+            pred_subroute_conf = float(subroute_probs[pred_subroute_id].item())
+            top_subroute_probs = format_top_probs(subroute_probs, subroute_classes)
+
+        pred = real_output.squeeze(0).detach().cpu().numpy()
         history = sample_data[:input_length, src_cols].detach().cpu().numpy()
-        target = sample_data[input_length:input_length + target_length, src_cols].detach().cpu().numpy()
+        target = real_target.squeeze(0).detach().cpu().numpy()
 
-        pred = inverse_standardized(pred, transform_matrix, mean_values)
         history = inverse_standardized(history, transform_matrix, mean_values)
-        target = inverse_standardized(target, transform_matrix, mean_values)
 
         history_xy = history[:, [1, 2]]
         pred_xy = np.vstack([history_xy[-1:], pred[:, [1, 2]]])
@@ -418,8 +692,22 @@ def save_prediction_plots(X_data, fold, output_dir, max_samples, window_labels=N
 
         ax.scatter(history_xy[0, 0], history_xy[0, 1], color="#1e40af", s=42, marker="s", label="Start")
         ax.scatter(history_xy[-1, 0], history_xy[-1, 1], color="#111827", s=46, marker="x", label="Predict from")
-        title_route = "" if route_label is None else f" [{route_label}]"
-        ax.set_title(f"Fold {fold} Sample {sample_idx}{title_route}: history vs prediction vs ground truth")
+        route_text = true_route or "-"
+        if pred_route is not None:
+            route_text = f"true {route_text} | pred {pred_route} p={pred_route_conf:.2f}"
+        subroute_text = ""
+        if true_subroute is not None or pred_subroute is not None:
+            confidence_text = "" if pred_subroute_conf is None else f" p={pred_subroute_conf:.2f}"
+            subroute_text = f" | true {true_subroute or '-'} | pred {pred_subroute or '-'}{confidence_text}"
+        sample_ade_value = to_float(sample_ade)
+        sample_fde_value = to_float(sample_fde)
+        sample_rmse_cog_value = to_float(sample_rmse_cog)
+        sample_rmse_sog_value = to_float(sample_rmse_sog)
+        metric_text = (
+            f"ADE {sample_ade_value:.3f}nmi/{sample_ade_value * 1852.0:.0f}m, "
+            f"FDE {sample_fde_value:.3f}nmi/{sample_fde_value * 1852.0:.0f}m"
+        )
+        ax.set_title(f"Fold {fold} Sample {sample_idx} [{route_text}{subroute_text}]\n{metric_text}", fontsize=9.5)
         ax.set_xlabel("Longitude")
         ax.set_ylabel("Latitude")
         ax.grid(True, linestyle="--", alpha=0.35)
@@ -427,13 +715,71 @@ def save_prediction_plots(X_data, fold, output_dir, max_samples, window_labels=N
         ax.set_aspect("equal", adjustable="datalim")
         fig.tight_layout()
 
-        route_part = "" if route_label is None else f"_{route_label}"
+        route_part = "" if route_label is None else f"_{sanitize_filename_part(route_label)}"
+        subroute_part = "" if true_subroute is None else f"_{sanitize_filename_part(true_subroute)}"
+        pred_part = "" if pred_subroute is None else f"_pred-{sanitize_filename_part(pred_subroute)}"
         save_path = output_dir / f"fold_{fold:02d}_sample_{plot_idx:03d}_idx{sample_idx:05d}{route_part}.png"
+        if subroute_part or pred_part:
+            save_path = output_dir / (
+                f"fold_{fold:02d}_sample_{plot_idx:03d}_idx{sample_idx:05d}"
+                f"{route_part}{subroute_part}{pred_part}.png"
+            )
         fig.savefig(save_path)
         plt.close(fig)
 
+        diagnostics.append({
+            "fold": fold,
+            "plot_rank": plot_idx,
+            "sample_index": int(sample_idx),
+            "route": true_route,
+            "true_route_id": true_route_id,
+            "pred_route_id": pred_route_id,
+            "pred_route": pred_route,
+            "pred_route_conf": pred_route_conf,
+            "route_match": (
+                None if true_route_id is None or pred_route_id is None
+                else true_route_id == pred_route_id
+            ),
+            "top_route_probs": top_route_probs,
+            "true_subroute_id": true_subroute_id,
+            "true_subroute": true_subroute,
+            "pred_subroute_id": pred_subroute_id,
+            "pred_subroute": pred_subroute,
+            "pred_subroute_conf": pred_subroute_conf,
+            "subroute_match": (
+                None if true_subroute_id is None or pred_subroute_id is None
+                else true_subroute_id == pred_subroute_id
+            ),
+            "top_subroute_probs": top_subroute_probs,
+            "ade_nmi": sample_ade_value,
+            "ade_m": sample_ade_value * 1852.0,
+            "fde_nmi": sample_fde_value,
+            "fde_m": sample_fde_value * 1852.0,
+            "rmse_cog_deg": sample_rmse_cog_value,
+            "rmse_sog_kn": sample_rmse_sog_value,
+            "history_end_lon": float(history_xy[-1, 0]),
+            "history_end_lat": float(history_xy[-1, 1]),
+            "pred_end_lon": float(pred[-1, 1]),
+            "pred_end_lat": float(pred[-1, 2]),
+            "true_end_lon": float(target[-1, 1]),
+            "true_end_lat": float(target[-1, 2]),
+            "plot_path": str(save_path),
+        })
 
-def evaluate(X_data, name='Eval'):
+    if diagnostics:
+        diagnostics_path = output_dir / f"fold_{fold:02d}_prediction_diagnostics.csv"
+        pd.DataFrame(diagnostics).to_csv(diagnostics_path, index=False, encoding="utf-8-sig")
+        logging.getLogger().info("Saved prediction diagnostics for fold %d to %s.", fold, diagnostics_path)
+
+
+def evaluate(
+        X_data,
+        route_targets=None,
+        subroute_targets=None,
+        name='Eval',
+        route_class_names=None,
+        subroute_class_names=None,
+):
     model.eval()
     eval_idx_list = np.arange(len(X_data), dtype="int32")
     total_loss = 0.0
@@ -442,6 +788,17 @@ def evaluate(X_data, name='Eval'):
     FDE_list = []
     rmse_cog_list = []
     rmse_sog_list = []
+    route_correct = 0
+    route_total = 0
+    route_class_correct = Counter()
+    route_class_total = Counter()
+    subroute_correct = 0
+    subroute_total = 0
+    subroute_class_correct = Counter()
+    subroute_class_total = Counter()
+    subroute_ade_sum = Counter()
+    subroute_fde_sum = Counter()
+    subroute_metric_total = Counter()
     with torch.no_grad():
         for idx in range(0, len(eval_idx_list), batch_size):
             batch_indices = eval_idx_list[idx:idx + batch_size]
@@ -452,12 +809,68 @@ def evaluate(X_data, name='Eval'):
             intent_y = torch.stack(
                 [X_data[i][input_length:input_length + target_length, intent_cols] for i in batch_indices]).cuda()
 
-            intent, raw_output = model(delta, src)
+            route_target = None
+            if route_targets is not None:
+                route_target = route_targets[batch_indices].to(device)
+            subroute_target = None
+            if subroute_targets is not None:
+                subroute_target = subroute_targets[batch_indices].to(device)
+
+            intent, raw_output, route_logits, subroute_logits, route_feature, subroute_feature = unpack_model_output(
+                model(delta, src)
+            )
             value_output = compose_value_output(raw_output, src)
             value_target = tgt_y
 
-            loss = compute_objective(intent, intent_y, value_output, value_target)
+            loss = compute_objective(
+                intent,
+                intent_y,
+                value_output,
+                value_target,
+                route_logits=route_logits,
+                route_target=route_target,
+                subroute_logits=subroute_logits,
+                subroute_target=subroute_target,
+                subroute_feature=subroute_feature,
+            )
+            if route_logits is not None and route_target is not None:
+                route_pred = torch.argmax(route_logits, dim=-1)
+                route_correct += int((route_pred == route_target).sum().item())
+                route_total += int(route_target.numel())
+                for pred_item, target_item in zip(route_pred.detach().cpu().tolist(),
+                                                  route_target.detach().cpu().tolist()):
+                    class_name = label_id_to_name(target_item, route_class_names)
+                    route_class_total[class_name] += 1
+                    if int(pred_item) == int(target_item):
+                        route_class_correct[class_name] += 1
+            if subroute_logits is not None and subroute_target is not None:
+                subroute_pred = torch.argmax(subroute_logits, dim=-1)
+                subroute_correct += int((subroute_pred == subroute_target).sum().item())
+                subroute_total += int(subroute_target.numel())
+                for pred_item, target_item in zip(subroute_pred.detach().cpu().tolist(),
+                                                  subroute_target.detach().cpu().tolist()):
+                    class_name = label_id_to_name(target_item, subroute_class_names)
+                    subroute_class_total[class_name] += 1
+                    if int(pred_item) == int(target_item):
+                        subroute_class_correct[class_name] += 1
             ADE, FDE, rmse_cog, rmse_sog, real_output, real_target = metric_tensors(value_output, value_target)
+            if subroute_target is not None:
+                sample_dist = metric_haversine(
+                    real_output[:, :, 1:3].float(),
+                    real_target[:, :, 1:3].float(),
+                )
+                sample_dist = sample_dist.reshape(-1, target_length)
+                sample_ade = sample_dist.mean(dim=1).detach().cpu().tolist()
+                sample_fde = sample_dist[:, -1].detach().cpu().tolist()
+                for target_item, ade_item, fde_item in zip(
+                        subroute_target.detach().cpu().tolist(),
+                        sample_ade,
+                        sample_fde,
+                ):
+                    class_name = label_id_to_name(target_item, subroute_class_names)
+                    subroute_ade_sum[class_name] += float(ade_item)
+                    subroute_fde_sum[class_name] += float(fde_item)
+                    subroute_metric_total[class_name] += 1
 
             ADE_list.append(ADE.detach().cpu())
             FDE_list.append(FDE.detach().cpu())
@@ -480,6 +893,46 @@ def evaluate(X_data, name='Eval'):
         print(" RMSE_COG: {:.5f}°".format(rmse_cog))
         rmse_sog = torch.stack(rmse_sog_list).mean()
         print(" RMSE_SOG: {:.5f}kn".format(rmse_sog))
+        if route_total > 0:
+            print(" Route_ACC: {:.2f}%".format(100.0 * route_correct / route_total))
+            if route_class_total:
+                detail = ", ".join(
+                    "{}:{:.1f}%({}/{})".format(
+                        class_name,
+                        100.0 * route_class_correct[class_name] / route_class_total[class_name],
+                        route_class_correct[class_name],
+                        route_class_total[class_name],
+                    )
+                    for class_name in sorted(route_class_total)
+                )
+                print(" Route_ACC_by_class: " + detail)
+                logging.getLogger().info("%s Route_ACC_by_class: %s", name, detail)
+        if subroute_total > 0:
+            print(" Subroute_ACC: {:.2f}%".format(100.0 * subroute_correct / subroute_total))
+            if subroute_class_total:
+                detail = ", ".join(
+                    "{}:{:.1f}%({}/{})".format(
+                        class_name,
+                        100.0 * subroute_class_correct[class_name] / subroute_class_total[class_name],
+                        subroute_class_correct[class_name],
+                        subroute_class_total[class_name],
+                    )
+                    for class_name in sorted(subroute_class_total)
+                )
+                print(" Subroute_ACC_by_class: " + detail)
+                logging.getLogger().info("%s Subroute_ACC_by_class: %s", name, detail)
+            if subroute_metric_total:
+                metric_detail = ", ".join(
+                    "{}:ADE {:.3f}nmi/FDE {:.3f}nmi(n={})".format(
+                        class_name,
+                        subroute_ade_sum[class_name] / max(subroute_metric_total[class_name], 1),
+                        subroute_fde_sum[class_name] / max(subroute_metric_total[class_name], 1),
+                        subroute_metric_total[class_name],
+                    )
+                    for class_name in sorted(subroute_metric_total)
+                )
+                print(" Subroute_ADE_FDE_by_class: " + metric_detail)
+                logging.getLogger().info("%s Subroute_ADE_FDE_by_class: %s", name, metric_detail)
 
         return eval_loss, ADE, FDE, rmse_cog, rmse_sog
 
@@ -490,7 +943,23 @@ def train(ep, parallel_train=False):
     sample = 0
     epoch_total_loss = 0
     epoch_sample = 0
-    train_idx_list = np.arange(len(X_train), dtype="int32")
+    train_idx_list = np.random.permutation(len(X_train)).astype("int32")
+    if (
+            args.use_balanced_subroute_sampling
+            and train_sampling_probabilities is not None
+            and args.balanced_sampling_mix_ratio > 0
+    ):
+        balanced_count = int(round(len(X_train) * args.balanced_sampling_mix_ratio))
+        normal_count = max(len(X_train) - balanced_count, 0)
+        normal_indices = train_idx_list[:normal_count]
+        balanced_indices = np.random.choice(
+            len(X_train),
+            size=balanced_count,
+            replace=True,
+            p=train_sampling_probabilities,
+        ).astype("int32")
+        train_idx_list = np.concatenate([normal_indices, balanced_indices]).astype("int32")
+        np.random.shuffle(train_idx_list)
     ADE_list = []
     FDE_list = []
     rmse_cog_list = []
@@ -506,12 +975,31 @@ def train(ep, parallel_train=False):
 
         optimizer.zero_grad()
 
-        intent, raw_output = model(delta, src)
+        route_target = None
+        if X_train_route_ids is not None:
+            route_target = X_train_route_ids[batch_indices].to(device)
+        subroute_target = None
+        if X_train_subroute_ids is not None:
+            subroute_target = X_train_subroute_ids[batch_indices].to(device)
+
+        intent, raw_output, route_logits, subroute_logits, route_feature, subroute_feature = unpack_model_output(
+            model(delta, src)
+        )
 
         value_output = compose_value_output(raw_output, src)
         value_target = tgt_y
 
-        loss = compute_objective(intent, intent_y, value_output, value_target)
+        loss = compute_objective(
+            intent,
+            intent_y,
+            value_output,
+            value_target,
+            route_logits=route_logits,
+            route_target=route_target,
+            subroute_logits=subroute_logits,
+            subroute_target=subroute_target,
+            subroute_feature=subroute_feature,
+        )
         with torch.no_grad():
             ADE, FDE, rmse_cog, rmse_sog, _, _ = metric_tensors(value_output, value_target)
 
@@ -586,10 +1074,37 @@ if __name__ == '__main__':
     parser.add_argument("--log_file", default="train.log")
     parser.add_argument("--plot_count", type=int, default=0)
     parser.add_argument("--plot_dir", default="plots")
-    parser.add_argument("--plot_strategy", choices=["first", "route_balanced"], default="first")
+    parser.add_argument("--plot_strategy", choices=["first", "route_balanced", "subroute_balanced"], default="first")
     parser.add_argument("--route_labels_path", default=None)
     parser.add_argument("--stratify_by_route", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--use_route_intent_head", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--route_intent_weight", type=float, default=0.2)
+    parser.add_argument("--use_route_embedding", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--route_embedding_dim", type=int, default=16)
+    parser.add_argument("--subroute_labels_path", default=None)
+    parser.add_argument("--stratify_by_subroute", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--use_subroute_intent_head", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--subroute_intent_weight", type=float, default=0.3)
+    parser.add_argument("--use_subroute_embedding", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--subroute_embedding_dim", type=int, default=16)
+    parser.add_argument("--use_hierarchical_intent", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--hierarchical_mask_strength", type=float, default=1.5)
+    parser.add_argument("--use_subroute_contrastive_loss", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--subroute_contrastive_weight", type=float, default=0.05)
+    parser.add_argument("--subroute_contrastive_temperature", type=float, default=0.2)
+    parser.add_argument("--use_subroute_focal_loss", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--subroute_focal_gamma", type=float, default=1.5)
+    parser.add_argument("--subroute_label_smoothing", type=float, default=0.0)
+    parser.add_argument("--use_subroute_class_weight", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--subroute_class_weight_alpha", type=float, default=0.5)
+    parser.add_argument("--subroute_class_weight_max_ratio", type=float, default=5.0)
+    parser.add_argument("--use_balanced_subroute_sampling", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--balanced_sampling_alpha", type=float, default=0.3)
+    parser.add_argument("--balanced_sampling_max_ratio", type=float, default=5.0)
+    parser.add_argument("--balanced_sampling_mix_ratio", type=float, default=0.3)
     parser.add_argument("--patience", type=int, default=3)
+    parser.add_argument("--early_stop_metric", choices=["loss", "ade", "ade_fde"], default="loss")
+    parser.add_argument("--early_stop_fde_weight", type=float, default=0.2)
     parser.add_argument("--window_stride", type=int, default=20)
     parser.add_argument("--target_mode", choices=["absolute", "residual_linear"], default="absolute")
     parser.add_argument("--use_geo_loss", action=BooleanOptionalAction, default=False)
@@ -612,6 +1127,52 @@ if __name__ == '__main__':
         raise ValueError("--geo_loss_scale must be positive.")
     if args.cog_loss_scale <= 0:
         raise ValueError("--cog_loss_scale must be positive.")
+    if args.use_route_embedding and not args.use_route_intent_head:
+        raise ValueError("--use_route_embedding requires --use_route_intent_head.")
+    if args.use_hierarchical_intent and not (args.use_route_intent_head and args.use_subroute_intent_head):
+        raise ValueError("--use_hierarchical_intent requires route and subroute intent heads.")
+    if args.route_intent_weight < 0:
+        raise ValueError("--route_intent_weight must be non-negative.")
+    if args.route_embedding_dim <= 0:
+        raise ValueError("--route_embedding_dim must be positive.")
+    if args.hierarchical_mask_strength < 0:
+        raise ValueError("--hierarchical_mask_strength must be non-negative.")
+    if args.use_subroute_embedding and not args.use_subroute_intent_head:
+        raise ValueError("--use_subroute_embedding requires --use_subroute_intent_head.")
+    if args.use_subroute_contrastive_loss and not args.use_subroute_intent_head:
+        raise ValueError("--use_subroute_contrastive_loss requires --use_subroute_intent_head.")
+    if args.use_subroute_focal_loss and not args.use_subroute_intent_head:
+        raise ValueError("--use_subroute_focal_loss requires --use_subroute_intent_head.")
+    if args.subroute_intent_weight < 0:
+        raise ValueError("--subroute_intent_weight must be non-negative.")
+    if args.subroute_embedding_dim <= 0:
+        raise ValueError("--subroute_embedding_dim must be positive.")
+    if args.subroute_contrastive_weight < 0:
+        raise ValueError("--subroute_contrastive_weight must be non-negative.")
+    if args.subroute_contrastive_temperature <= 0:
+        raise ValueError("--subroute_contrastive_temperature must be positive.")
+    if args.subroute_focal_gamma < 0:
+        raise ValueError("--subroute_focal_gamma must be non-negative.")
+    if not 0 <= args.subroute_label_smoothing < 1:
+        raise ValueError("--subroute_label_smoothing must be in [0, 1).")
+    if args.use_subroute_class_weight and not args.use_subroute_intent_head:
+        raise ValueError("--use_subroute_class_weight requires --use_subroute_intent_head.")
+    if args.use_balanced_subroute_sampling and not args.use_subroute_intent_head:
+        raise ValueError("--use_balanced_subroute_sampling requires --use_subroute_intent_head.")
+    if args.subroute_class_weight_alpha < 0:
+        raise ValueError("--subroute_class_weight_alpha must be non-negative.")
+    if args.subroute_class_weight_max_ratio < 1:
+        raise ValueError("--subroute_class_weight_max_ratio must be at least 1.")
+    if args.balanced_sampling_alpha < 0:
+        raise ValueError("--balanced_sampling_alpha must be non-negative.")
+    if args.balanced_sampling_max_ratio < 1:
+        raise ValueError("--balanced_sampling_max_ratio must be at least 1.")
+    if not 0 <= args.balanced_sampling_mix_ratio <= 1:
+        raise ValueError("--balanced_sampling_mix_ratio must be between 0 and 1.")
+    if args.patience < 1:
+        raise ValueError("--patience must be at least 1.")
+    if args.early_stop_fde_weight < 0:
+        raise ValueError("--early_stop_fde_weight must be non-negative.")
 
     run_name = make_run_name(args)
     run_dir = Path(args.results_dir) / run_name
@@ -635,6 +1196,49 @@ if __name__ == '__main__':
         args.cog_weight,
         args.cog_loss_scale,
     )
+    logger.info(
+        "Route switches: head=%s(w=%.3f), embedding=%s(dim=%d), hierarchical=%s(mask_strength=%.3f).",
+        args.use_route_intent_head,
+        args.route_intent_weight,
+        args.use_route_embedding,
+        args.route_embedding_dim,
+        args.use_hierarchical_intent,
+        args.hierarchical_mask_strength,
+    )
+    logger.info(
+        "Subroute switches: labels=%s, head=%s(w=%.3f), embedding=%s(dim=%d), "
+        "contrastive=%s(w=%.3f,temp=%.3f), focal=%s(gamma=%.3f,smooth=%.3f), "
+        "stratify_by_subroute=%s.",
+        args.subroute_labels_path,
+        args.use_subroute_intent_head,
+        args.subroute_intent_weight,
+        args.use_subroute_embedding,
+        args.subroute_embedding_dim,
+        args.use_subroute_contrastive_loss,
+        args.subroute_contrastive_weight,
+        args.subroute_contrastive_temperature,
+        args.use_subroute_focal_loss,
+        args.subroute_focal_gamma,
+        args.subroute_label_smoothing,
+        args.stratify_by_subroute,
+    )
+    logger.info(
+        "Subroute balance: class_weight=%s(alpha=%.3f,max_ratio=%.3f), "
+        "balanced_sampling=%s(alpha=%.3f,max_ratio=%.3f,mix=%.3f).",
+        args.use_subroute_class_weight,
+        args.subroute_class_weight_alpha,
+        args.subroute_class_weight_max_ratio,
+        args.use_balanced_subroute_sampling,
+        args.balanced_sampling_alpha,
+        args.balanced_sampling_max_ratio,
+        args.balanced_sampling_mix_ratio,
+    )
+    logger.info(
+        "Early stopping: metric=%s, fde_weight=%.3f, patience=%d.",
+        args.early_stop_metric,
+        args.early_stop_fde_weight,
+        args.patience,
+    )
     logger.info("Metrics: RMSE_COG is computed with circular 0/360 degree difference.")
 
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -648,6 +1252,10 @@ if __name__ == '__main__':
     # 'MMSI','Length','Course','Lon_d','Lat_d','SOG','vx','vy', delta 'Course','Lon_d','Lat_d','SOG','vx','vy', 'UnixTime'
     data = pd.read_pickle(args.data_path)
     route_labels = load_route_labels(args.route_labels_path, len(data))
+    route_classes, route_label_to_id, route_track_ids = build_label_encoder(route_labels)
+    subroute_labels = load_label_field(args.subroute_labels_path, len(data), "subroute")
+    subroute_classes, subroute_label_to_id, subroute_track_ids = build_label_encoder(subroute_labels)
+    route_to_subroute_mask = build_route_to_subroute_mask(route_classes, subroute_classes)
     data_lengths = np.array([len(item) for item in data])
     logger.info(
         "Dataset loaded from %s, tracks %d, length min/mean/max %d/%.2f/%d.",
@@ -658,9 +1266,27 @@ if __name__ == '__main__':
         data_lengths.max(),
     )
     if route_labels is not None:
-        logger.info("Route labels loaded from %s, counts %s.", args.route_labels_path, dict(Counter(route_labels)))
+        logger.info(
+            "Route labels loaded from %s, classes %d, counts %s.",
+            args.route_labels_path,
+            len(route_classes),
+            dict(Counter(route_labels)),
+        )
+    if subroute_labels is not None:
+        logger.info(
+            "Subroute labels loaded from %s, classes %d, counts %s.",
+            args.subroute_labels_path,
+            len(subroute_classes),
+            dict(Counter(subroute_labels)),
+        )
     if args.stratify_by_route and route_labels is None:
         raise ValueError("--stratify_by_route requires --route_labels_path.")
+    if args.use_route_intent_head and route_labels is None:
+        raise ValueError("--use_route_intent_head requires --route_labels_path.")
+    if args.stratify_by_subroute and subroute_labels is None:
+        raise ValueError("--stratify_by_subroute requires --subroute_labels_path.")
+    if args.use_subroute_intent_head and subroute_labels is None:
+        raise ValueError("--use_subroute_intent_head requires --subroute_labels_path.")
 
     evaluation_scores = []
     pred_list = []
@@ -668,12 +1294,22 @@ if __name__ == '__main__':
     start_time = time.time()
 
     Path(args.model_dir).mkdir(parents=True, exist_ok=True)
-    if args.stratify_by_route:
+    split_labels = None
+    split_label_name = "none"
+    if args.stratify_by_subroute:
+        split_labels = subroute_labels
+        split_label_name = "subroute"
+    elif args.stratify_by_route:
+        split_labels = route_labels
+        split_label_name = "route"
+
+    if split_labels is not None:
         k_fold = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=42)
-        fold_iter = k_fold.split(np.arange(len(data)), route_labels)
+        fold_iter = k_fold.split(np.arange(len(data)), split_labels)
     else:
         k_fold = KFold(n_splits=args.folds, shuffle=True, random_state=42)
         fold_iter = k_fold.split(data)
+    logger.info("KFold split mode: %s.", split_label_name)
     fold = 1
     for i, (train_indices, test_indices) in enumerate(fold_iter):
         if fold > args.run_folds:
@@ -682,15 +1318,33 @@ if __name__ == '__main__':
         fold_test_indices = np.array(test_indices)
         fold_train_labels = None
         fold_test_labels = None
+        fold_train_route_ids = None
+        fold_test_route_ids = None
+        fold_train_subroute_ids = None
+        fold_test_subroute_ids = None
         if route_labels is not None:
             fold_train_labels = np.array([route_labels[idx] for idx in fold_train_indices])
             fold_test_labels = np.array([route_labels[idx] for idx in fold_test_indices])
+            fold_train_route_ids = route_track_ids[fold_train_indices]
+            fold_test_route_ids = route_track_ids[fold_test_indices]
             logger.info(
                 "Fold %d/%d route counts, train %s, test %s.",
                 fold,
                 args.folds,
                 dict(Counter(fold_train_labels.tolist())),
                 dict(Counter(fold_test_labels.tolist())),
+            )
+        if subroute_track_ids is not None:
+            fold_train_subroute_ids = subroute_track_ids[fold_train_indices]
+            fold_test_subroute_ids = subroute_track_ids[fold_test_indices]
+            train_subroute_names = [subroute_classes[int(item)] for item in fold_train_subroute_ids]
+            test_subroute_names = [subroute_classes[int(item)] for item in fold_test_subroute_ids]
+            logger.info(
+                "Fold %d/%d subroute counts, train %s, test %s.",
+                fold,
+                args.folds,
+                dict(Counter(train_subroute_names)),
+                dict(Counter(test_subroute_names)),
             )
 
         train_data, mean_values, std_values = data_prepare([data[i] for i in fold_train_indices], 0.6, 0.2)
@@ -730,6 +1384,12 @@ if __name__ == '__main__':
         train_track_labels = None if fold_train_labels is None else fold_train_labels[train_indices]
         valid_track_labels = None if fold_train_labels is None else fold_train_labels[valid_indices]
         test_track_labels = fold_test_labels
+        train_route_track_ids = None if fold_train_route_ids is None else fold_train_route_ids[train_indices]
+        valid_route_track_ids = None if fold_train_route_ids is None else fold_train_route_ids[valid_indices]
+        test_route_track_ids = fold_test_route_ids
+        train_subroute_track_ids = None if fold_train_subroute_ids is None else fold_train_subroute_ids[train_indices]
+        valid_subroute_track_ids = None if fold_train_subroute_ids is None else fold_train_subroute_ids[valid_indices]
+        test_subroute_track_ids = fold_test_subroute_ids
 
 
         def create_window_slices(data):
@@ -742,6 +1402,12 @@ if __name__ == '__main__':
         X_train_window_labels = expand_track_labels_to_windows(train_track_labels, X_train_slices)
         X_valid_window_labels = expand_track_labels_to_windows(valid_track_labels, X_valid_slices)
         X_test_window_labels = expand_track_labels_to_windows(test_track_labels, X_test_slices)
+        X_train_window_route_ids = expand_track_labels_to_windows(train_route_track_ids, X_train_slices)
+        X_valid_window_route_ids = expand_track_labels_to_windows(valid_route_track_ids, X_valid_slices)
+        X_test_window_route_ids = expand_track_labels_to_windows(test_route_track_ids, X_test_slices)
+        X_train_window_subroute_ids = expand_track_labels_to_windows(train_subroute_track_ids, X_train_slices)
+        X_valid_window_subroute_ids = expand_track_labels_to_windows(valid_subroute_track_ids, X_valid_slices)
+        X_test_window_subroute_ids = expand_track_labels_to_windows(test_subroute_track_ids, X_test_slices)
 
         X_train_list = X_train_slices
         X_valid_list = X_valid_slices
@@ -754,6 +1420,67 @@ if __name__ == '__main__':
         X_train, X_valid, X_test = torch.tensor(X_train_list).float(), torch.tensor(
             X_valid_list).float(), torch.tensor(
             X_test_list).float()
+        X_train_route_ids = None
+        X_valid_route_ids = None
+        X_test_route_ids = None
+        if X_train_window_route_ids is not None:
+            X_train_route_ids = torch.tensor(X_train_window_route_ids, dtype=torch.long)
+            X_valid_route_ids = torch.tensor(X_valid_window_route_ids, dtype=torch.long)
+            X_test_route_ids = torch.tensor(X_test_window_route_ids, dtype=torch.long)
+        X_train_subroute_ids = None
+        X_valid_subroute_ids = None
+        X_test_subroute_ids = None
+        subroute_class_weights = None
+        train_sampling_probabilities = None
+        if args.use_subroute_intent_head:
+            X_train_subroute_ids = torch.tensor(X_train_window_subroute_ids, dtype=torch.long)
+            X_valid_subroute_ids = torch.tensor(X_valid_window_subroute_ids, dtype=torch.long)
+            X_test_subroute_ids = torch.tensor(X_test_window_subroute_ids, dtype=torch.long)
+            subroute_class_count = len(subroute_classes)
+
+            if args.use_subroute_class_weight:
+                subroute_class_weights = make_subroute_class_weights(
+                    X_train_window_subroute_ids,
+                    subroute_class_count,
+                    args.subroute_class_weight_alpha,
+                    args.subroute_class_weight_max_ratio,
+                )
+                class_weight_values = None if subroute_class_weights is None else subroute_class_weights.detach().cpu().numpy()
+                logger.info(
+                    "Fold %d/%d subroute class weights: %s.",
+                    fold,
+                    args.folds,
+                    format_class_values(class_weight_values, subroute_classes),
+                )
+
+            if args.use_balanced_subroute_sampling:
+                train_sampling_probabilities = make_balanced_sampling_probabilities(
+                    X_train_window_subroute_ids,
+                    subroute_class_count,
+                    args.balanced_sampling_alpha,
+                    args.balanced_sampling_max_ratio,
+                )
+                if train_sampling_probabilities is not None:
+                    natural_mass = np.bincount(
+                        X_train_window_subroute_ids,
+                        minlength=subroute_class_count,
+                    ).astype(np.float32)
+                    natural_mass = natural_mass / max(float(np.sum(natural_mass)), 1.0)
+                    balanced_mass = np.bincount(
+                        X_train_window_subroute_ids,
+                        weights=train_sampling_probabilities,
+                        minlength=subroute_class_count,
+                    )
+                    mixed_mass = (
+                        (1.0 - args.balanced_sampling_mix_ratio) * natural_mass
+                        + args.balanced_sampling_mix_ratio * balanced_mass
+                    )
+                    logger.info(
+                        "Fold %d/%d subroute sampling expected class ratio: %s.",
+                        fold,
+                        args.folds,
+                        format_class_values(mixed_mass, subroute_classes),
+                    )
         logger.info(
             "Fold %d/%d prepared, tracks train/valid/test %d/%d/%d, windows train/valid/test %d/%d/%d.",
             fold,
@@ -767,21 +1494,46 @@ if __name__ == '__main__':
         )
         if X_test_window_labels is not None:
             logger.info("Fold %d/%d test window route counts %s.", fold, args.folds, dict(Counter(X_test_window_labels.tolist())))
+        if X_test_window_subroute_ids is not None:
+            test_window_subroutes = [subroute_classes[int(item)] for item in X_test_window_subroute_ids.tolist()]
+            logger.info(
+                "Fold %d/%d test window subroute counts %s.",
+                fold,
+                args.folds,
+                dict(Counter(test_window_subroutes)),
+        )
         """---------------------------"""
         lr = 2e-4
+        route_class_count = len(route_classes) if args.use_route_intent_head else 0
+        subroute_class_count = len(subroute_classes) if args.use_subroute_intent_head else 0
         model = iTentformer(input_size_tcn, input_size, local_intent_size, output_size, concat_dim, input_length,
-                              num_channels, kernel_size, d_model, dropout).to(device)
+                              num_channels, kernel_size, d_model, dropout,
+                              subroute_classes=subroute_class_count,
+                              use_subroute_intent_head=args.use_subroute_intent_head,
+                              use_subroute_embedding=args.use_subroute_embedding,
+                              subroute_embedding_dim=args.subroute_embedding_dim,
+                              route_classes=route_class_count,
+                              use_route_intent_head=args.use_route_intent_head,
+                              use_route_embedding=args.use_route_embedding,
+                              route_embedding_dim=args.route_embedding_dim,
+                              use_hierarchical_intent=args.use_hierarchical_intent,
+                              route_to_subroute_mask=route_to_subroute_mask,
+                              hierarchical_mask_strength=args.hierarchical_mask_strength).to(device)
         awl = AutomaticWeightedLoss(2).cuda()
         if fold == 1:
             model_logger.info("number of parameters: %.6e", count_parameters(model))
             model_logger.info("number of AWL parameters: %.6e", count_parameters(awl))
+            if args.use_route_intent_head:
+                model_logger.info("route classes: %d, labels: %s", route_class_count, route_classes)
+            if args.use_subroute_intent_head:
+                model_logger.info("subroute classes: %d, labels: %s", subroute_class_count, subroute_classes)
         optimizer = optim.Adam([
             {'params': model.parameters()},
             {'params': awl.parameters()}], lr=lr, weight_decay=0)
 
-        best_vloss = 1e8
+        best_monitor_score = 1e8
         lr_lower_bound = 1e-10
-        vloss_list = []
+        monitor_score_list = []
         model_name = str(Path(args.model_dir) / f"{args.model_prefix}_K{fold}.pt")
         best_epoch = 0
         early_stopping = EarlyStopping(patience=args.patience, verbose=False)
@@ -792,7 +1544,14 @@ if __name__ == '__main__':
                 raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
             logger.info("Eval-only mode, fold %d/%d, loading model from %s.", fold, args.folds, checkpoint_path)
             model = load_model_checkpoint(checkpoint_path, model)
-            tloss, ADE, FDE, rmse_cog, rmse_sog = evaluate(X_test, name='Final Test')
+            tloss, ADE, FDE, rmse_cog, rmse_sog = evaluate(
+                X_test,
+                route_targets=X_test_route_ids,
+                subroute_targets=X_test_subroute_ids,
+                name='Final Test',
+                route_class_names=route_classes,
+                subroute_class_names=subroute_classes,
+            )
             log_metric_line(logger, "Final Test", fold, args.folds, 0, tloss, ADE, FDE, rmse_cog, rmse_sog)
             if args.plot_count > 0:
                 fold_plot_dir = run_dir / args.plot_dir
@@ -803,6 +1562,10 @@ if __name__ == '__main__':
                     args.plot_count,
                     window_labels=X_test_window_labels,
                     plot_strategy=args.plot_strategy,
+                    window_route_ids=X_test_window_route_ids,
+                    route_classes=route_classes,
+                    window_subroute_ids=X_test_window_subroute_ids,
+                    subroute_classes=subroute_classes,
                 )
                 logger.info(
                     "Saved %d prediction plot(s) for fold %d/%d to %s with strategy %s.",
@@ -827,49 +1590,106 @@ if __name__ == '__main__':
             train_loss = train(ep, parallel_train=False)
             logger.info("Training, fold %d/%d, epoch %03d, loss %.5f, lr %.6e.", fold, args.folds, ep, train_loss, lr)
 
-            vloss, vade, vfde, vrmse_cog, vrmse_sog = evaluate(X_valid, name='Validation')
+            vloss, vade, vfde, vrmse_cog, vrmse_sog = evaluate(
+                X_valid,
+                route_targets=X_valid_route_ids,
+                subroute_targets=X_valid_subroute_ids,
+                name='Validation',
+                route_class_names=route_classes,
+                subroute_class_names=subroute_classes,
+            )
             log_metric_line(logger, "Valid", fold, args.folds, ep, vloss, vade, vfde, vrmse_cog, vrmse_sog)
 
-            tloss, tade, tfde, trmse_cog, trmse_sog = evaluate(X_test, name='Test')
+            tloss, tade, tfde, trmse_cog, trmse_sog = evaluate(
+                X_test,
+                route_targets=X_test_route_ids,
+                subroute_targets=X_test_subroute_ids,
+                name='Test',
+                route_class_names=route_classes,
+                subroute_class_names=subroute_classes,
+            )
             log_metric_line(logger, "Test", fold, args.folds, ep, tloss, tade, tfde, trmse_cog, trmse_sog)
-            # 设置 EarlyStopping
-            early_stopping(vloss, model)
+            monitor_score, monitor_name = early_stop_monitor_value(vloss, vade, vfde)
+            logger.info(
+                "Early-stop monitor, fold %d/%d, epoch %03d, %s %.5f.",
+                fold,
+                args.folds,
+                ep,
+                monitor_name,
+                monitor_score,
+            )
 
-            if early_stopping.early_stop:
-                logger.info("Early stopping, fold %d/%d, epoch %03d, best epoch %03d.", fold, args.folds, ep, best_epoch)
-                print("Early stopping")
-                break
-
-            if vloss < best_vloss:
+            improved = monitor_score < best_monitor_score
+            if improved:
                 with open(model_name, "wb") as f:
                     torch.save(model, f)
                     print("Saved model!\n")
                 best_epoch = ep
-                logger.info("Best epoch: %03d, fold %d/%d, saving model to %s", ep, fold, args.folds, model_name)
-                best_vloss = vloss
-            else:
                 logger.info(
-                    "No improvement, fold %d/%d, epoch %03d, early-stop counter %d/%d.",
+                    "Best epoch: %03d, fold %d/%d, %s %.5f, saving model to %s",
+                    ep,
+                    fold,
+                    args.folds,
+                    monitor_name,
+                    monitor_score,
+                    model_name,
+                )
+                best_monitor_score = monitor_score
+
+            early_stopping(monitor_score, model)
+            if not improved:
+                logger.info(
+                    "No improvement, fold %d/%d, epoch %03d, %s %.5f, best %.5f, early-stop counter %d/%d.",
                     fold,
                     args.folds,
                     ep,
+                    monitor_name,
+                    monitor_score,
+                    best_monitor_score,
                     early_stopping.counter,
                     early_stopping.patience,
                 )
+            if early_stopping.early_stop:
+                logger.info(
+                    "Early stopping, fold %d/%d, epoch %03d, best epoch %03d, best %s %.5f.",
+                    fold,
+                    args.folds,
+                    ep,
+                    best_epoch,
+                    monitor_name,
+                    best_monitor_score,
+                )
+                print("Early stopping")
+                break
 
-            if ep > 5 and vloss > max(vloss_list[-3:]) and lr > lr_lower_bound:
+            if ep > 5 and len(monitor_score_list) >= 3 and monitor_score > max(monitor_score_list[-3:]) and lr > lr_lower_bound:
                 lr /= 2.0
                 for param_group in optimizer.param_groups:
                     param_group['lr'] = lr
-                logger.info("Learning rate reduced, fold %d/%d, epoch %03d, lr %.6e.", fold, args.folds, ep, lr)
+                logger.info(
+                    "Learning rate reduced, fold %d/%d, epoch %03d, %s %.5f, lr %.6e.",
+                    fold,
+                    args.folds,
+                    ep,
+                    monitor_name,
+                    monitor_score,
+                    lr,
+                )
 
-            vloss_list.append(vloss)
+            monitor_score_list.append(monitor_score)
 
         model = load_model_checkpoint(model_name, model)
         """
         You can test the model by applying the training process annotation to the following code
         """
-        tloss, ADE, FDE, rmse_cog, rmse_sog = evaluate(X_test, name='Final Test')
+        tloss, ADE, FDE, rmse_cog, rmse_sog = evaluate(
+            X_test,
+            route_targets=X_test_route_ids,
+            subroute_targets=X_test_subroute_ids,
+            name='Final Test',
+            route_class_names=route_classes,
+            subroute_class_names=subroute_classes,
+        )
         log_metric_line(logger, "Final Test", fold, args.folds, best_epoch, tloss, ADE, FDE, rmse_cog, rmse_sog)
         if args.plot_count > 0:
             fold_plot_dir = run_dir / args.plot_dir
@@ -880,6 +1700,10 @@ if __name__ == '__main__':
                 args.plot_count,
                 window_labels=X_test_window_labels,
                 plot_strategy=args.plot_strategy,
+                window_route_ids=X_test_window_route_ids,
+                route_classes=route_classes,
+                window_subroute_ids=X_test_window_subroute_ids,
+                subroute_classes=subroute_classes,
             )
             logger.info(
                 "Saved %d prediction plot(s) for fold %d/%d to %s with strategy %s.",
