@@ -407,6 +407,81 @@ python iTentformer.py --early_stop_metric loss
 
 不建议一开始就把小类采样做成完全均衡，因为这会让训练分布明显偏离真实航路分布，可能导致大类预测变差。
 
+### 8.3 分支选择增强
+
+当前默认启用了互相配合的层级分支选择模块：
+
+```python
+intent_summary_mode = "mean_last_delta"
+branch_routing_temperature = 0.7
+hard_subroute_routing = True
+confidence_aware_routing = True
+routing_confidence_threshold = 0.8
+routing_margin_threshold = 0.35
+routing_top_k = 2
+use_branch_teacher_forcing = True
+use_route_prototype_prior = True
+use_subroute_prototype_prior = True
+```
+
+- `mean_last_delta`：子航路分类同时使用历史均值、最后状态和首尾变化，增强分岔口附近的识别能力。
+- `hard_subroute_routing`：允许高置信度样本明确使用概率最高的子航路。
+- `confidence_aware_routing`：只有第一名概率和领先差值同时达标时才硬选择；否则保留 Top-2 概率，避免共享航段上的暂时误判锁死未来轨迹。
+- `branch_teacher_forcing`：训练前期较多使用真实分支引导轨迹解码，随后逐步切换为模型预测分支。
+- `route_prototype_prior`：每一折只从训练集构建 OA/OB1/OB2/OC 主航路原型，先校正大类判断。
+- `subroute_prototype_prior`：每一折只从该折训练集构建平均航路原型，利用当前位置和行进方向给候选子航路加几何分数，不使用验证集和测试集。
+
+训练日志会显示：
+
+```text
+Branch routing: summary=mean_last_delta, temperature=0.700, hard_subroute=True, ...
+Branch teacher forcing, fold 1/5, epoch 001, ratio 0.700.
+Fold 1/5 built route prototypes from ... training tracks only, shape (4, 32, 2).
+Fold 1/5 built subroute prototypes from ... training tracks only, shape (11, 32, 2).
+Final Test Route_Routing: hard ..., uncertain_top2_recall ...
+```
+
+做消融实验时，可以分别关闭模块：
+
+```powershell
+python iTentformer.py --no-use_subroute_prototype_prior
+python iTentformer.py --no-use_route_prototype_prior
+python iTentformer.py --no-confidence_aware_routing
+python iTentformer.py --no-hard_subroute_routing
+python iTentformer.py --no-use_branch_teacher_forcing
+python iTentformer.py --intent_summary_mode mean
+```
+
+注意：这些增强改变了模型结构和 checkpoint 内容，增强前保存的旧模型不能作为新模型继续训练；需要重新训练后再测试。
+
+### 8.4 显式候选轨迹筛选
+
+低置信度 Top-2 不再只做 embedding 平均。模型会额外生成两条强制分支轨迹，并与原始预测组成三个候选：
+
+```text
+安全候选：原置信度路由预测
+分支候选 1：Top-1 主航路及其最佳子航路
+分支候选 2：Top-2 主航路及其最佳子航路
+```
+
+训练时根据真实 `ADE + candidate_fde_weight * FDE` 标记三个候选中的优胜者，只用这个标签训练候选筛选器。筛选器输入不包含真实未来，只包含历史特征、候选分类概率、原型贴合度和运动连续性。
+
+为了避免随机初始化的筛选器拖累主模型：
+
+```python
+candidate_selector_warmup_epochs = 10
+candidate_trajectory_weight = 0.0
+candidate_switch_confidence_threshold = 0.7
+candidate_switch_logit_margin = 0.3
+```
+
+- 前 10 轮只训练筛选器，正式指标继续使用安全候选。
+- 筛选器不通过候选轨迹损失扰动原预测器。
+- 预热后也只有当分支候选概率足够高、并明显胜过安全候选时才允许切换。
+- 推理最终仍只输出一条轨迹。
+
+日志中的 `Candidate_Selector` 会报告优胜者选择准确率、Top-2 航路召回率、实际切换比例和理论 Oracle 指标。
+
 ## 9. 复现实验命令
 
 默认训练：

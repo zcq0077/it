@@ -261,7 +261,17 @@ class iTentformer(nn.Module):
                  num_channels, kernel_size, d_model, dropout, subroute_classes=0,
                  use_subroute_intent_head=False, use_subroute_embedding=False, subroute_embedding_dim=16,
                  route_classes=0, use_route_intent_head=False, use_route_embedding=False, route_embedding_dim=16,
-                 use_hierarchical_intent=False, route_to_subroute_mask=None, hierarchical_mask_strength=1.0):
+                 use_hierarchical_intent=False, route_to_subroute_mask=None, hierarchical_mask_strength=1.0,
+                 intent_summary_mode="mean", branch_routing_temperature=1.0,
+                 hard_subroute_routing=False, subroute_prototypes=None,
+                 prototype_prior_weight=0.0, prototype_distance_scale=0.25,
+                 prototype_direction_weight=0.5, route_prototypes=None,
+                 route_prototype_prior_weight=0.0, confidence_aware_routing=False,
+                 routing_confidence_threshold=0.8, routing_margin_threshold=0.35,
+                 routing_top_k=2, use_candidate_selector=False,
+                 candidate_selector_hidden_dim=64,
+                 candidate_probability_prior_weight=0.3,
+                 candidate_base_prior_bias=0.5):
         super().__init__()
         self.TCN = TCN(input_size_tcn, local_intent_size, num_channels, kernel_size, dropout=dropout)
         self.TrajModel = TrajModel(input_size, d_model, output_size, concat_dim, input_length, dropout)
@@ -278,7 +288,45 @@ class iTentformer(nn.Module):
             and subroute_classes > 0
         )
         self.hierarchical_mask_strength = hierarchical_mask_strength
+        self.intent_summary_mode = intent_summary_mode
+        self.branch_routing_temperature = branch_routing_temperature
+        self.hard_subroute_routing = hard_subroute_routing
+        self.prototype_prior_weight = prototype_prior_weight
+        self.prototype_distance_scale = prototype_distance_scale
+        self.prototype_direction_weight = prototype_direction_weight
+        self.route_prototype_prior_weight = route_prototype_prior_weight
+        self.confidence_aware_routing = confidence_aware_routing
+        self.routing_confidence_threshold = routing_confidence_threshold
+        self.routing_margin_threshold = routing_margin_threshold
+        self.routing_top_k = routing_top_k
+        self.use_candidate_selector = (
+            use_candidate_selector
+            and self.use_route_embedding
+            and self.use_subroute_embedding
+        )
+        self.candidate_probability_prior_weight = candidate_probability_prior_weight
+        self.candidate_base_prior_bias = candidate_base_prior_bias
         feature_dim = num_channels[-1]
+
+        if route_prototypes is not None:
+            self.register_buffer("route_prototypes", route_prototypes.float())
+        else:
+            self.route_prototypes = None
+        if subroute_prototypes is not None:
+            self.register_buffer("subroute_prototypes", subroute_prototypes.float())
+        else:
+            self.subroute_prototypes = None
+
+        if intent_summary_mode == "mean_last_delta":
+            self.intent_summary = nn.Sequential(
+                nn.LayerNorm(feature_dim * 3),
+                nn.Linear(feature_dim * 3, feature_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.LayerNorm(feature_dim),
+            )
+        elif intent_summary_mode != "mean":
+            raise ValueError(f"Unsupported intent summary mode: {intent_summary_mode}")
 
         if self.use_route_intent_head:
             self.route_head = nn.Sequential(
@@ -304,24 +352,236 @@ class iTentformer(nn.Module):
                 self.subroute_embedding = nn.Embedding(subroute_classes, subroute_embedding_dim)
                 self.subroute_to_intent = nn.Linear(subroute_embedding_dim, feature_dim)
 
+        if self.use_candidate_selector:
+            selector_input_dim = (
+                feature_dim
+                + route_embedding_dim
+                + subroute_embedding_dim
+                + 6
+            )
+            self.candidate_selector = nn.Sequential(
+                nn.LayerNorm(selector_input_dim),
+                nn.Linear(selector_input_dim, candidate_selector_hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(candidate_selector_hidden_dim, 1),
+            )
+
         if route_to_subroute_mask is not None:
             self.register_buffer("route_to_subroute_mask", route_to_subroute_mask.float())
         else:
             self.route_to_subroute_mask = None
 
-    def forward(self, delta, src):
+    def _intent_feature(self, intent):
+        if self.intent_summary_mode == "mean":
+            return intent.mean(dim=1)
+        history_summary = torch.cat(
+            (intent.mean(dim=1), intent[:, -1, :], intent[:, -1, :] - intent[:, 0, :]),
+            dim=-1,
+        )
+        return self.intent_summary(history_summary)
+
+    def _routing_prob(self, logits, target=None, teacher_forcing_ratio=0.0, hard=False):
+        temperature = max(float(self.branch_routing_temperature), 1e-6)
+        soft_prob = torch.softmax(logits / temperature, dim=-1)
+        routing_prob = soft_prob
+
+        if hard:
+            hard_prob = F.one_hot(
+                torch.argmax(soft_prob, dim=-1),
+                num_classes=soft_prob.size(-1),
+            ).to(dtype=soft_prob.dtype)
+            if self.training:
+                hard_prob = hard_prob + soft_prob - soft_prob.detach()
+
+            if self.confidence_aware_routing and soft_prob.size(-1) > 1:
+                top_k = min(max(int(self.routing_top_k), 1), soft_prob.size(-1))
+                top_values, top_indices = torch.topk(soft_prob, k=top_k, dim=-1)
+                top_k_prob = torch.zeros_like(soft_prob).scatter(-1, top_indices, top_values)
+                top_k_prob = top_k_prob / top_k_prob.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+                top_two = torch.topk(soft_prob, k=2, dim=-1).values
+                confidence = top_two[:, :1]
+                margin = top_two[:, :1] - top_two[:, 1:2]
+                confident = (
+                    (confidence >= self.routing_confidence_threshold)
+                    & (margin >= self.routing_margin_threshold)
+                )
+                routing_prob = torch.where(confident, hard_prob, top_k_prob)
+            else:
+                routing_prob = hard_prob
+
+        if self.training and target is not None and teacher_forcing_ratio > 0:
+            teacher_prob = F.one_hot(
+                target.long(),
+                num_classes=soft_prob.size(-1),
+            ).to(dtype=soft_prob.dtype)
+            teacher_mask = torch.rand(
+                soft_prob.size(0), 1, device=soft_prob.device
+            ) < teacher_forcing_ratio
+            routing_prob = torch.where(teacher_mask, teacher_prob, routing_prob)
+
+        return routing_prob
+
+    def _prototype_prior_logits(self, src, prototypes):
+        if prototypes is None:
+            return None
+
+        last_position = src[:, -1, 1:3]
+        history_direction = last_position - src[:, 0, 1:3]
+        distance = torch.linalg.vector_norm(
+            last_position[:, None, None, :] - prototypes[None, :, :, :],
+            dim=-1,
+        )
+        min_distance, nearest_index = torch.min(distance, dim=-1)
+
+        tangent = torch.empty_like(prototypes)
+        tangent[:, 0, :] = prototypes[:, 1, :] - prototypes[:, 0, :]
+        tangent[:, -1, :] = prototypes[:, -1, :] - prototypes[:, -2, :]
+        tangent[:, 1:-1, :] = prototypes[:, 2:, :] - prototypes[:, :-2, :]
+        expanded_tangent = tangent.unsqueeze(0).expand(src.size(0), -1, -1, -1)
+        gather_index = nearest_index[:, :, None, None].expand(-1, -1, 1, 2)
+        nearest_tangent = torch.gather(expanded_tangent, 2, gather_index).squeeze(2)
+
+        history_direction = F.normalize(history_direction, dim=-1, eps=1e-6)
+        nearest_tangent = F.normalize(nearest_tangent, dim=-1, eps=1e-6)
+        direction_similarity = torch.sum(
+            history_direction[:, None, :] * nearest_tangent,
+            dim=-1,
+        )
+        return (
+            -min_distance / max(float(self.prototype_distance_scale), 1e-6)
+            + self.prototype_direction_weight * direction_similarity
+        )
+
+    def decode_candidates(self, delta, src, candidate_route_ids, candidate_subroute_ids):
+        if not (self.use_route_embedding and self.use_subroute_embedding):
+            raise RuntimeError("Candidate decoding requires route and subroute embeddings.")
+
+        batch_size, candidate_count = candidate_route_ids.shape
+        base_intent = self.TCN(delta)
+        expanded_intent = base_intent[:, None, :, :].expand(
+            -1, candidate_count, -1, -1
+        ).reshape(batch_size * candidate_count, base_intent.size(1), base_intent.size(2))
+
+        route_emb = self.route_embedding(candidate_route_ids.reshape(-1))
+        route_bias = self.route_to_intent(route_emb).unsqueeze(1)
+        subroute_emb = self.subroute_embedding(candidate_subroute_ids.reshape(-1))
+        subroute_bias = self.subroute_to_intent(subroute_emb).unsqueeze(1)
+        candidate_intent = expanded_intent + route_bias + subroute_bias
+
+        expanded_src = src[:, None, :, :].expand(
+            -1, candidate_count, -1, -1
+        ).reshape(batch_size * candidate_count, src.size(1), src.size(2))
+        raw_output, _ = self.TrajModel(expanded_src.transpose(1, 2), candidate_intent)
+        return raw_output.reshape(
+            batch_size,
+            candidate_count,
+            raw_output.size(1),
+            raw_output.size(2),
+        )
+
+    def score_candidates(
+            self,
+            src,
+            intent_feature,
+            route_logits,
+            subroute_logits,
+            candidate_route_ids,
+            candidate_subroute_ids,
+            candidate_value_outputs,
+            candidate_is_base=None,
+    ):
+        if not self.use_candidate_selector:
+            raise RuntimeError("Candidate selector is disabled.")
+
+        candidate_count = candidate_route_ids.size(1)
+        route_log_prob = F.log_softmax(route_logits, dim=-1).gather(1, candidate_route_ids)
+        subroute_log_prob = F.log_softmax(subroute_logits, dim=-1).gather(1, candidate_subroute_ids)
+
+        history_velocity = src[:, -1, 1:3] - src[:, -2, 1:3]
+        candidate_velocity = (
+            candidate_value_outputs[:, :, 0, 1:3]
+            - src[:, None, -1, 1:3]
+        )
+        continuity_error = torch.linalg.vector_norm(
+            candidate_velocity - history_velocity[:, None, :],
+            dim=-1,
+        )
+        all_velocity = candidate_value_outputs[:, :, 1:, 1:3] - candidate_value_outputs[:, :, :-1, 1:3]
+        if all_velocity.size(2) > 1:
+            smoothness_error = torch.linalg.vector_norm(
+                all_velocity[:, :, 1:, :] - all_velocity[:, :, :-1, :],
+                dim=-1,
+            ).mean(dim=-1)
+        else:
+            smoothness_error = torch.zeros_like(continuity_error)
+
+        if self.subroute_prototypes is not None:
+            candidate_prototypes = self.subroute_prototypes[candidate_subroute_ids]
+            candidate_positions = candidate_value_outputs[:, :, :, 1:3]
+            prototype_distance = torch.linalg.vector_norm(
+                candidate_positions[:, :, :, None, :]
+                - candidate_prototypes[:, :, None, :, :],
+                dim=-1,
+            ).min(dim=-1).values.mean(dim=-1)
+        else:
+            prototype_distance = torch.zeros_like(continuity_error)
+
+        if candidate_is_base is None:
+            candidate_is_base = torch.zeros_like(continuity_error)
+
+        route_emb = self.route_embedding(candidate_route_ids)
+        subroute_emb = self.subroute_embedding(candidate_subroute_ids)
+        expanded_feature = intent_feature[:, None, :].expand(-1, candidate_count, -1)
+        numeric_features = torch.stack(
+            (
+                route_log_prob,
+                subroute_log_prob,
+                -continuity_error,
+                -smoothness_error,
+                -prototype_distance,
+                candidate_is_base.to(dtype=continuity_error.dtype),
+            ),
+            dim=-1,
+        )
+        selector_input = torch.cat(
+            (
+                expanded_feature.detach(),
+                route_emb.detach(),
+                subroute_emb.detach(),
+                numeric_features.detach(),
+            ),
+            dim=-1,
+        )
+        learned_score = self.candidate_selector(selector_input).squeeze(-1)
+        probability_prior = route_log_prob + subroute_log_prob
+        return (
+            learned_score
+            + self.candidate_probability_prior_weight * probability_prior
+            + self.candidate_base_prior_bias * candidate_is_base
+        )
+
+    def forward(self, delta, src, route_target=None, subroute_target=None, teacher_forcing_ratio=0.0):
         intent = self.TCN(delta)
         route_logits = None
         route_feature = None
         subroute_logits = None
         subroute_feature = None
-        intent_feature = intent.mean(dim=1)
+        intent_feature = self._intent_feature(intent)
 
         if self.use_route_intent_head:
             route_feature = intent_feature
             route_logits = self.route_head(route_feature)
+            route_prototype_prior = self._prototype_prior_logits(src, self.route_prototypes)
+            if route_prototype_prior is not None and self.route_prototype_prior_weight > 0:
+                route_logits = route_logits + self.route_prototype_prior_weight * route_prototype_prior
+            route_prob = self._routing_prob(
+                route_logits,
+                target=route_target,
+                teacher_forcing_ratio=teacher_forcing_ratio,
+                hard=self.confidence_aware_routing,
+            )
             if self.use_route_embedding:
-                route_prob = torch.softmax(route_logits, dim=-1)
                 route_emb = torch.matmul(route_prob, self.route_embedding.weight)
                 route_bias = self.route_to_intent(route_emb).unsqueeze(1)
                 intent = intent + route_bias
@@ -329,12 +589,19 @@ class iTentformer(nn.Module):
         if self.use_subroute_intent_head:
             subroute_feature = intent_feature
             subroute_logits = self.subroute_head(subroute_feature)
+            prototype_prior = self._prototype_prior_logits(src, self.subroute_prototypes)
+            if prototype_prior is not None:
+                subroute_logits = subroute_logits + self.prototype_prior_weight * prototype_prior
             if self.use_hierarchical_intent and self.route_to_subroute_mask is not None:
-                route_prob = torch.softmax(route_logits, dim=-1)
                 subroute_gate = torch.matmul(route_prob, self.route_to_subroute_mask).clamp_min(1e-6)
                 subroute_logits = subroute_logits + self.hierarchical_mask_strength * torch.log(subroute_gate)
             if self.use_subroute_embedding:
-                subroute_prob = torch.softmax(subroute_logits, dim=-1)
+                subroute_prob = self._routing_prob(
+                    subroute_logits,
+                    target=subroute_target,
+                    teacher_forcing_ratio=teacher_forcing_ratio,
+                    hard=self.hard_subroute_routing,
+                )
                 subroute_emb = torch.matmul(subroute_prob, self.subroute_embedding.weight)
                 intent_bias = self.subroute_to_intent(subroute_emb).unsqueeze(1)
                 intent = intent + intent_bias

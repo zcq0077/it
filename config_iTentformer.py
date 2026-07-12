@@ -66,6 +66,58 @@ class Config:
     use_subroute_embedding = True
     subroute_embedding_dim = 16
 
+    # 子航路判断使用“历史均值 + 最后位置 + 首尾变化”三部分特征。
+    # 相比只做全历史平均，它更容易捕捉接近分岔口和刚开始转向的信号。
+    intent_summary_mode = "mean_last_delta"
+
+    # 小于 1 会让分支概率更集中。hard routing 会在推理时明确选择一条子航路，
+    # 避免多个子航路 embedding 被平均后预测到两条航路中间。
+    branch_routing_temperature = 0.7
+    hard_subroute_routing = True
+
+    # 高置信度时明确选择第一名；置信度不足或前两名接近时，保留 Top-2 候选概率。
+    # 这样 OA/OB1 等共享航段上的暂时犹豫不会立刻把整条未来轨迹锁到错误航路。
+    confidence_aware_routing = True
+    routing_confidence_threshold = 0.8
+    routing_margin_threshold = 0.35
+    routing_top_k = 2
+
+    # 显式生成两条独立候选轨迹，并由学习型筛选器最终只选择一条输出。
+    # 训练时用候选轨迹真实 ADE/FDE 的优胜者监督筛选器；推理时筛选器不读取真实未来。
+    use_candidate_selector = True
+    candidate_count = 2
+    candidate_selector_hidden_dim = 64
+    candidate_selector_weight = 0.2
+    candidate_trajectory_weight = 0.0
+    candidate_fde_weight = 0.2
+    candidate_probability_prior_weight = 0.3
+    candidate_base_prior_bias = 0.5
+    candidate_selector_warmup_epochs = 10
+    candidate_switch_confidence_threshold = 0.7
+    candidate_switch_logit_margin = 0.3
+    candidate_include_target_during_training = True
+
+    # 训练前期用真实子航路帮助预测器学会“不同标签对应不同走向”，
+    # 随训练逐步切换为模型自己的分类结果，减小训练和推理之间的差异。
+    use_branch_teacher_forcing = True
+    branch_teacher_forcing_start = 0.7
+    branch_teacher_forcing_end = 0.1
+    branch_teacher_forcing_decay_epochs = 30
+
+    # 主航路同样使用每折训练集原型，优先修正 OB1 被判断成 OA 一类的大类错误。
+    use_route_prototype_prior = True
+    route_prototype_points = 32
+    route_prototype_weight = 0.6
+
+    # 每一折只使用该折训练轨迹构建子航路平均原型，不读取验证集或测试集。
+    # 当前轨迹越接近某条原型线、行进方向越一致，该子航路的分类分数越高。
+    # 它主要在已经接近或进入分岔区域后提供帮助，共享主航道上不会凭空知道未来选择。
+    use_subroute_prototype_prior = True
+    subroute_prototype_points = 32
+    subroute_prototype_weight = 0.8
+    subroute_prototype_distance_scale = 0.25
+    subroute_prototype_direction_weight = 0.5
+
     # 层级意图约束。大类概率会约束小类概率：
     # 例如大类更像 OA 时，OA_S00/OA_S01/OA_S02 会更容易被选中，OC_Sxx 会被压低。
     # strength 越大约束越强；太大时如果大类判断错，会拖累小类，所以默认用温和强度。
@@ -103,7 +155,7 @@ class Config:
     # ======================================================================
     # 保存模型文件时用的前缀。最终通常类似：
     # save_models/dma_2023_06_07_08_ti_4class_K1.pt
-    model_prefix = "dma_2023_06_07_08_ti_4class"
+    model_prefix = "dma_2023_06_07_08_ti_4class_candidate_v3"
 
     # 模型 checkpoint 保存目录。
     model_dir = "save_models"

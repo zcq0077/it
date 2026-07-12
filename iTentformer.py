@@ -72,6 +72,7 @@ metric_haversine = HaversineLoss(min_hav=0.0).to(device)
 stable_haversine = HaversineLoss(min_hav=1e-7).to(device)
 subroute_class_weights = None
 train_sampling_probabilities = None
+candidate_selector_runtime_active = False
 
 
 def setup_logging(log_path, append=False):
@@ -276,6 +277,142 @@ def compose_value_output(raw_output, src):
     return raw_output
 
 
+def compose_candidate_outputs(raw_outputs, src):
+    if args.target_mode == "residual_linear":
+        return build_linear_baseline(src)[:, None, :, :] + raw_outputs
+    return raw_outputs
+
+
+def build_hierarchical_candidates(
+        route_logits,
+        subroute_logits,
+        candidate_count,
+        route_targets=None,
+        subroute_targets=None,
+        include_targets=False,
+):
+    if route_logits is None or subroute_logits is None or route_to_subroute_mask is None:
+        raise RuntimeError("Hierarchical candidates require route/subroute logits and their class mask.")
+
+    candidate_count = min(max(int(candidate_count), 1), route_logits.size(-1))
+    candidate_route_ids = torch.topk(route_logits.detach(), k=candidate_count, dim=-1).indices
+    route_masks = route_to_subroute_mask[candidate_route_ids].bool()
+    expanded_subroute_logits = subroute_logits.detach()[:, None, :].expand(-1, candidate_count, -1)
+    masked_subroute_logits = expanded_subroute_logits.masked_fill(~route_masks, -1e9)
+    candidate_subroute_ids = torch.argmax(masked_subroute_logits, dim=-1)
+
+    if include_targets and route_targets is not None and subroute_targets is not None:
+        for batch_idx in range(candidate_route_ids.size(0)):
+            matching = torch.nonzero(
+                candidate_route_ids[batch_idx].eq(route_targets[batch_idx]),
+                as_tuple=False,
+            ).view(-1)
+            slot = int(matching[0].item()) if matching.numel() else candidate_count - 1
+            candidate_route_ids[batch_idx, slot] = route_targets[batch_idx]
+            candidate_subroute_ids[batch_idx, slot] = subroute_targets[batch_idx]
+
+    return candidate_route_ids, candidate_subroute_ids
+
+
+def candidate_trajectory_costs(candidate_value_outputs, value_target):
+    batch_size, candidate_count, sequence_length, _ = candidate_value_outputs.shape
+    real_candidates = standardized_to_real(candidate_value_outputs)
+    real_target = standardized_to_real(value_target)
+    expanded_target = real_target[:, None, :, :].expand(-1, candidate_count, -1, -1)
+    distance = stable_haversine(
+        real_candidates[:, :, :, 1:3].reshape(batch_size * candidate_count, sequence_length, 2).float(),
+        expanded_target[:, :, :, 1:3].reshape(batch_size * candidate_count, sequence_length, 2).float(),
+    ).reshape(batch_size, candidate_count, sequence_length)
+    ade = distance.mean(dim=-1)
+    fde = distance[:, :, -1]
+    return ade + args.candidate_fde_weight * fde, ade, fde
+
+
+def prepare_candidate_prediction(
+        delta,
+        src,
+        base_value_output,
+        route_logits,
+        subroute_logits,
+        intent_feature,
+        route_targets=None,
+        subroute_targets=None,
+        include_targets=False,
+):
+    branch_route_ids, branch_subroute_ids = build_hierarchical_candidates(
+        route_logits,
+        subroute_logits,
+        args.candidate_count,
+        route_targets=route_targets,
+        subroute_targets=subroute_targets,
+        include_targets=include_targets,
+    )
+    candidate_raw_outputs = model.decode_candidates(
+        delta,
+        src,
+        branch_route_ids,
+        branch_subroute_ids,
+    )
+    branch_value_outputs = compose_candidate_outputs(candidate_raw_outputs, src)
+    base_route_ids = torch.argmax(route_logits.detach(), dim=-1, keepdim=True)
+    base_subroute_ids = torch.argmax(subroute_logits.detach(), dim=-1, keepdim=True)
+    candidate_route_ids = torch.cat((base_route_ids, branch_route_ids), dim=1)
+    candidate_subroute_ids = torch.cat((base_subroute_ids, branch_subroute_ids), dim=1)
+    candidate_value_outputs = torch.cat(
+        (base_value_output[:, None, :, :], branch_value_outputs),
+        dim=1,
+    )
+    candidate_is_base = torch.zeros(
+        candidate_route_ids.shape,
+        device=candidate_route_ids.device,
+        dtype=candidate_value_outputs.dtype,
+    )
+    candidate_is_base[:, 0] = 1.0
+    selector_logits = model.score_candidates(
+        src,
+        intent_feature,
+        route_logits,
+        subroute_logits,
+        candidate_route_ids,
+        candidate_subroute_ids,
+        candidate_value_outputs,
+        candidate_is_base=candidate_is_base,
+    )
+    selector_probs = F.softmax(selector_logits, dim=-1)
+    branch_score, branch_offset = torch.max(selector_logits[:, 1:], dim=-1)
+    branch_index = branch_offset + 1
+    branch_probability = selector_probs.gather(1, branch_index.unsqueeze(1)).squeeze(1)
+    switch_to_branch = (
+        (branch_probability >= args.candidate_switch_confidence_threshold)
+        & ((branch_score - selector_logits[:, 0]) >= args.candidate_switch_logit_margin)
+    )
+    selected_index = torch.where(
+        switch_to_branch,
+        branch_index,
+        torch.zeros_like(branch_index),
+    )
+    gather_index = selected_index[:, None, None, None].expand(
+        -1,
+        1,
+        candidate_value_outputs.size(2),
+        candidate_value_outputs.size(3),
+    )
+    selected_output = torch.gather(candidate_value_outputs, 1, gather_index).squeeze(1)
+    return {
+        "route_ids": candidate_route_ids,
+        "subroute_ids": candidate_subroute_ids,
+        "branch_route_ids": branch_route_ids,
+        "branch_subroute_ids": branch_subroute_ids,
+        "is_base": candidate_is_base,
+        "outputs": candidate_value_outputs,
+        "selector_logits": selector_logits,
+        "selected_index": selected_index,
+        "switch_to_branch": switch_to_branch,
+        "branch_probability": branch_probability,
+        "selected_output": selected_output,
+    }
+
+
 def supervised_contrastive_loss(features, labels, temperature):
     if features is None or labels is None or features.size(0) < 2:
         return torch.zeros((), device=device)
@@ -416,6 +553,22 @@ def early_stop_monitor_value(vloss, vade, vfde):
     raise ValueError(f"Unsupported early_stop_metric: {args.early_stop_metric}")
 
 
+def branch_teacher_forcing_ratio(epoch):
+    if not args.use_branch_teacher_forcing:
+        return 0.0
+    if args.branch_teacher_forcing_decay_epochs <= 1:
+        return args.branch_teacher_forcing_end
+
+    progress = min(
+        max((epoch - 1) / float(args.branch_teacher_forcing_decay_epochs - 1), 0.0),
+        1.0,
+    )
+    return (
+        args.branch_teacher_forcing_start
+        + progress * (args.branch_teacher_forcing_end - args.branch_teacher_forcing_start)
+    )
+
+
 def load_route_labels(path, expected_count):
     if not path:
         return None
@@ -512,6 +665,31 @@ def make_balanced_sampling_probabilities(label_ids, class_count, alpha, max_rati
     return sample_weights / total
 
 
+def resample_track_positions(track, point_count):
+    positions = np.asarray(track[:, [3, 4]], dtype=np.float32)
+    source_progress = np.linspace(0.0, 1.0, len(positions), dtype=np.float32)
+    target_progress = np.linspace(0.0, 1.0, point_count, dtype=np.float32)
+    return np.stack(
+        [np.interp(target_progress, source_progress, positions[:, axis]) for axis in range(2)],
+        axis=-1,
+    ).astype(np.float32)
+
+
+def build_class_prototypes(tracks, label_ids, class_count, point_count):
+    label_ids = np.asarray(label_ids, dtype=np.int64)
+    prototypes = []
+    for class_id in range(class_count):
+        class_tracks = [
+            resample_track_positions(track, point_count)
+            for track, label_id in zip(tracks, label_ids)
+            if int(label_id) == class_id
+        ]
+        if not class_tracks:
+            raise ValueError(f"Cannot build prototype for empty subroute class {class_id}.")
+        prototypes.append(np.mean(np.stack(class_tracks, axis=0), axis=0))
+    return torch.tensor(np.stack(prototypes, axis=0), dtype=torch.float32, device=device)
+
+
 def format_class_values(values, class_names, precision=3):
     if values is None:
         return "none"
@@ -587,6 +765,46 @@ def format_top_probs(probs, class_names, top_k=3):
     return ";".join(parts)
 
 
+def update_routing_stats(logits, targets, stats):
+    if logits is None or targets is None or not args.confidence_aware_routing:
+        return
+    probs = F.softmax(logits / args.branch_routing_temperature, dim=-1)
+    top_k = min(max(args.routing_top_k, 1), probs.size(-1))
+    top_values, top_indices = torch.topk(probs, k=top_k, dim=-1)
+    top1 = top_indices[:, 0]
+    if probs.size(-1) > 1:
+        margin = top_values[:, 0] - top_values[:, 1]
+    else:
+        margin = torch.ones_like(top_values[:, 0])
+    confident = (
+        (top_values[:, 0] >= args.routing_confidence_threshold)
+        & (margin >= args.routing_margin_threshold)
+    )
+    top1_correct = top1.eq(targets)
+    topk_hit = top_indices.eq(targets.unsqueeze(1)).any(dim=1)
+
+    stats["hard_total"] += int(confident.sum().item())
+    stats["hard_correct"] += int((top1_correct & confident).sum().item())
+    uncertain = ~confident
+    stats["topk_total"] += int(uncertain.sum().item())
+    stats["topk_top1_correct"] += int((top1_correct & uncertain).sum().item())
+    stats["topk_hit"] += int((topk_hit & uncertain).sum().item())
+
+
+def format_routing_stats(stats, top_k):
+    hard_total = stats["hard_total"]
+    topk_total = stats["topk_total"]
+    total = hard_total + topk_total
+    hard_acc = 100.0 * stats["hard_correct"] / max(hard_total, 1)
+    topk_top1_acc = 100.0 * stats["topk_top1_correct"] / max(topk_total, 1)
+    topk_recall = 100.0 * stats["topk_hit"] / max(topk_total, 1)
+    return (
+        f"hard {hard_total}/{total} ({100.0 * hard_total / max(total, 1):.1f}%), "
+        f"hard_top1_acc {hard_acc:.1f}%, uncertain {topk_total}/{total}, "
+        f"uncertain_top1_acc {topk_top1_acc:.1f}%, uncertain_top{top_k}_recall {topk_recall:.1f}%"
+    )
+
+
 def load_model_checkpoint(checkpoint_path, current_model):
     try:
         loaded = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -643,8 +861,48 @@ def save_prediction_plots(
         value_target = sample_data[input_length:input_length + target_length, src_cols].unsqueeze(0).to(device)
 
         with torch.no_grad():
-            _, raw_output, route_logits, subroute_logits, _, _ = unpack_model_output(model(delta, src))
+            _, raw_output, route_logits, subroute_logits, _, subroute_feature = unpack_model_output(model(delta, src))
             output = compose_value_output(raw_output, src)
+            selected_candidate_index = None
+            selected_candidate_route_id = None
+            selected_candidate_subroute_id = None
+            candidate_summary = None
+            if args.use_candidate_selector and candidate_selector_runtime_active:
+                candidate_result = prepare_candidate_prediction(
+                    delta,
+                    src,
+                    output,
+                    route_logits,
+                    subroute_logits,
+                    subroute_feature,
+                )
+                output = candidate_result["selected_output"]
+                selected_candidate_index = int(candidate_result["selected_index"].item())
+                selected_candidate_route_id = int(
+                    candidate_result["route_ids"][0, selected_candidate_index].item()
+                )
+                selected_candidate_subroute_id = int(
+                    candidate_result["subroute_ids"][0, selected_candidate_index].item()
+                )
+                selector_probs = F.softmax(candidate_result["selector_logits"], dim=-1).squeeze(0)
+                candidate_parts = []
+                for candidate_idx in range(candidate_result["route_ids"].size(1)):
+                    candidate_kind = (
+                        "base" if float(candidate_result["is_base"][0, candidate_idx]) > 0.5
+                        else f"branch{candidate_idx}"
+                    )
+                    route_name = label_id_to_name(
+                        candidate_result["route_ids"][0, candidate_idx],
+                        route_classes,
+                    )
+                    subroute_name = label_id_to_name(
+                        candidate_result["subroute_ids"][0, candidate_idx],
+                        subroute_classes,
+                    )
+                    candidate_parts.append(
+                        f"{candidate_kind}-{route_name}/{subroute_name}:{float(selector_probs[candidate_idx]):.3f}"
+                    )
+                candidate_summary = ";".join(candidate_parts)
             sample_ade, sample_fde, sample_rmse_cog, sample_rmse_sog, real_output, real_target = metric_tensors(
                 output,
                 value_target,
@@ -699,6 +957,10 @@ def save_prediction_plots(
         if true_subroute is not None or pred_subroute is not None:
             confidence_text = "" if pred_subroute_conf is None else f" p={pred_subroute_conf:.2f}"
             subroute_text = f" | true {true_subroute or '-'} | pred {pred_subroute or '-'}{confidence_text}"
+        if selected_candidate_route_id is not None:
+            selected_route = label_id_to_name(selected_candidate_route_id, route_classes)
+            selected_subroute = label_id_to_name(selected_candidate_subroute_id, subroute_classes)
+            subroute_text += f" | selected {selected_route}/{selected_subroute}"
         sample_ade_value = to_float(sample_ade)
         sample_fde_value = to_float(sample_fde)
         sample_rmse_cog_value = to_float(sample_rmse_cog)
@@ -751,6 +1013,10 @@ def save_prediction_plots(
                 else true_subroute_id == pred_subroute_id
             ),
             "top_subroute_probs": top_subroute_probs,
+            "selected_candidate_index": selected_candidate_index,
+            "selected_candidate_route": label_id_to_name(selected_candidate_route_id, route_classes),
+            "selected_candidate_subroute": label_id_to_name(selected_candidate_subroute_id, subroute_classes),
+            "candidate_selector_probs": candidate_summary,
             "ade_nmi": sample_ade_value,
             "ade_m": sample_ade_value * 1852.0,
             "fde_nmi": sample_fde_value,
@@ -792,6 +1058,7 @@ def evaluate(
     route_total = 0
     route_class_correct = Counter()
     route_class_total = Counter()
+    route_routing_stats = Counter()
     subroute_correct = 0
     subroute_total = 0
     subroute_class_correct = Counter()
@@ -799,6 +1066,15 @@ def evaluate(
     subroute_ade_sum = Counter()
     subroute_fde_sum = Counter()
     subroute_metric_total = Counter()
+    subroute_routing_stats = Counter()
+    candidate_total = 0
+    candidate_selector_correct = 0
+    candidate_route_hit = 0
+    candidate_subroute_hit = 0
+    candidate_oracle_ade_sum = 0.0
+    candidate_oracle_fde_sum = 0.0
+    candidate_branch_switch_count = 0
+    candidate_branch_switch_correct = 0
     with torch.no_grad():
         for idx in range(0, len(eval_idx_list), batch_size):
             batch_indices = eval_idx_list[idx:idx + batch_size]
@@ -822,6 +1098,59 @@ def evaluate(
             value_output = compose_value_output(raw_output, src)
             value_target = tgt_y
 
+            selector_loss = None
+            best_candidate_cost = None
+            if args.use_candidate_selector and candidate_selector_runtime_active:
+                candidate_result = prepare_candidate_prediction(
+                    delta,
+                    src,
+                    value_output,
+                    route_logits,
+                    subroute_logits,
+                    subroute_feature,
+                )
+                value_output = candidate_result["selected_output"]
+                candidate_cost, candidate_ade, candidate_fde = candidate_trajectory_costs(
+                    candidate_result["outputs"],
+                    value_target,
+                )
+                winner_target = torch.argmin(candidate_cost, dim=-1)
+                selector_loss = F.cross_entropy(
+                    candidate_result["selector_logits"],
+                    winner_target,
+                )
+                best_candidate_cost = candidate_cost.gather(
+                    1,
+                    winner_target.unsqueeze(1),
+                ).mean()
+                candidate_total += int(winner_target.numel())
+                candidate_selector_correct += int(
+                    candidate_result["selected_index"].eq(winner_target).sum().item()
+                )
+                candidate_branch_switch_count += int(
+                    candidate_result["switch_to_branch"].sum().item()
+                )
+                candidate_branch_switch_correct += int(
+                    (
+                        candidate_result["switch_to_branch"]
+                        & candidate_result["selected_index"].eq(winner_target)
+                    ).sum().item()
+                )
+                if route_target is not None:
+                    candidate_route_hit += int(
+                        candidate_result["branch_route_ids"].eq(route_target.unsqueeze(1)).any(dim=1).sum().item()
+                    )
+                if subroute_target is not None:
+                    candidate_subroute_hit += int(
+                        candidate_result["branch_subroute_ids"].eq(subroute_target.unsqueeze(1)).any(dim=1).sum().item()
+                    )
+                candidate_oracle_ade_sum += float(
+                    candidate_ade.gather(1, winner_target.unsqueeze(1)).sum().item()
+                )
+                candidate_oracle_fde_sum += float(
+                    candidate_fde.gather(1, winner_target.unsqueeze(1)).sum().item()
+                )
+
             loss = compute_objective(
                 intent,
                 intent_y,
@@ -833,8 +1162,15 @@ def evaluate(
                 subroute_target=subroute_target,
                 subroute_feature=subroute_feature,
             )
+            if selector_loss is not None:
+                loss = (
+                    loss
+                    + args.candidate_selector_weight * selector_loss
+                    + args.candidate_trajectory_weight * best_candidate_cost
+                )
             if route_logits is not None and route_target is not None:
                 route_pred = torch.argmax(route_logits, dim=-1)
+                update_routing_stats(route_logits, route_target, route_routing_stats)
                 route_correct += int((route_pred == route_target).sum().item())
                 route_total += int(route_target.numel())
                 for pred_item, target_item in zip(route_pred.detach().cpu().tolist(),
@@ -845,6 +1181,7 @@ def evaluate(
                         route_class_correct[class_name] += 1
             if subroute_logits is not None and subroute_target is not None:
                 subroute_pred = torch.argmax(subroute_logits, dim=-1)
+                update_routing_stats(subroute_logits, subroute_target, subroute_routing_stats)
                 subroute_correct += int((subroute_pred == subroute_target).sum().item())
                 subroute_total += int(subroute_target.numel())
                 for pred_item, target_item in zip(subroute_pred.detach().cpu().tolist(),
@@ -893,6 +1230,19 @@ def evaluate(
         print(" RMSE_COG: {:.5f}°".format(rmse_cog))
         rmse_sog = torch.stack(rmse_sog_list).mean()
         print(" RMSE_SOG: {:.5f}kn".format(rmse_sog))
+        if args.use_candidate_selector and candidate_selector_runtime_active and candidate_total > 0:
+            candidate_detail = (
+                f"selector_winner_acc {100.0 * candidate_selector_correct / candidate_total:.1f}%, "
+                f"route_recall@{args.candidate_count} {100.0 * candidate_route_hit / candidate_total:.1f}%, "
+                f"subroute_recall@{args.candidate_count} {100.0 * candidate_subroute_hit / candidate_total:.1f}%, "
+                f"branch_switch {candidate_branch_switch_count}/{candidate_total} "
+                f"({100.0 * candidate_branch_switch_count / candidate_total:.1f}%), "
+                f"switch_winner_acc {100.0 * candidate_branch_switch_correct / max(candidate_branch_switch_count, 1):.1f}%, "
+                f"oracle_ADE@{args.candidate_count + 1} {candidate_oracle_ade_sum / candidate_total:.3f}nmi, "
+                f"oracle_FDE@{args.candidate_count + 1} {candidate_oracle_fde_sum / candidate_total:.3f}nmi"
+            )
+            print(" Candidate_Selector: " + candidate_detail)
+            logging.getLogger().info("%s Candidate_Selector: %s", name, candidate_detail)
         if route_total > 0:
             print(" Route_ACC: {:.2f}%".format(100.0 * route_correct / route_total))
             if route_class_total:
@@ -907,6 +1257,10 @@ def evaluate(
                 )
                 print(" Route_ACC_by_class: " + detail)
                 logging.getLogger().info("%s Route_ACC_by_class: %s", name, detail)
+            if args.confidence_aware_routing:
+                routing_detail = format_routing_stats(route_routing_stats, args.routing_top_k)
+                print(" Route_Routing: " + routing_detail)
+                logging.getLogger().info("%s Route_Routing: %s", name, routing_detail)
         if subroute_total > 0:
             print(" Subroute_ACC: {:.2f}%".format(100.0 * subroute_correct / subroute_total))
             if subroute_class_total:
@@ -921,6 +1275,10 @@ def evaluate(
                 )
                 print(" Subroute_ACC_by_class: " + detail)
                 logging.getLogger().info("%s Subroute_ACC_by_class: %s", name, detail)
+            if args.confidence_aware_routing:
+                routing_detail = format_routing_stats(subroute_routing_stats, args.routing_top_k)
+                print(" Subroute_Routing: " + routing_detail)
+                logging.getLogger().info("%s Subroute_Routing: %s", name, routing_detail)
             if subroute_metric_total:
                 metric_detail = ", ".join(
                     "{}:ADE {:.3f}nmi/FDE {:.3f}nmi(n={})".format(
@@ -939,6 +1297,7 @@ def evaluate(
 
 def train(ep, parallel_train=False):
     model.train()
+    teacher_forcing_ratio = branch_teacher_forcing_ratio(ep)
     total_loss = 0
     sample = 0
     epoch_total_loss = 0
@@ -983,7 +1342,13 @@ def train(ep, parallel_train=False):
             subroute_target = X_train_subroute_ids[batch_indices].to(device)
 
         intent, raw_output, route_logits, subroute_logits, route_feature, subroute_feature = unpack_model_output(
-            model(delta, src)
+            model(
+                delta,
+                src,
+                route_target=route_target,
+                subroute_target=subroute_target,
+                teacher_forcing_ratio=teacher_forcing_ratio,
+            )
         )
 
         value_output = compose_value_output(raw_output, src)
@@ -1000,6 +1365,36 @@ def train(ep, parallel_train=False):
             subroute_target=subroute_target,
             subroute_feature=subroute_feature,
         )
+        if args.use_candidate_selector:
+            candidate_result = prepare_candidate_prediction(
+                delta,
+                src,
+                value_output,
+                route_logits,
+                subroute_logits,
+                subroute_feature,
+                route_targets=route_target,
+                subroute_targets=subroute_target,
+                include_targets=args.candidate_include_target_during_training,
+            )
+            candidate_cost, _, _ = candidate_trajectory_costs(
+                candidate_result["outputs"],
+                value_target,
+            )
+            winner_target = torch.argmin(candidate_cost.detach(), dim=-1)
+            selector_loss = F.cross_entropy(
+                candidate_result["selector_logits"],
+                winner_target,
+            )
+            best_candidate_cost = candidate_cost.gather(
+                1,
+                winner_target.unsqueeze(1),
+            ).mean()
+            loss = (
+                loss
+                + args.candidate_selector_weight * selector_loss
+                + args.candidate_trajectory_weight * best_candidate_cost
+            )
         with torch.no_grad():
             ADE, FDE, rmse_cog, rmse_sog, _, _ = metric_tensors(value_output, value_target)
 
@@ -1087,6 +1482,37 @@ if __name__ == '__main__':
     parser.add_argument("--subroute_intent_weight", type=float, default=0.3)
     parser.add_argument("--use_subroute_embedding", action=BooleanOptionalAction, default=False)
     parser.add_argument("--subroute_embedding_dim", type=int, default=16)
+    parser.add_argument("--intent_summary_mode", choices=["mean", "mean_last_delta"], default="mean")
+    parser.add_argument("--branch_routing_temperature", type=float, default=1.0)
+    parser.add_argument("--hard_subroute_routing", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--use_branch_teacher_forcing", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--branch_teacher_forcing_start", type=float, default=0.7)
+    parser.add_argument("--branch_teacher_forcing_end", type=float, default=0.1)
+    parser.add_argument("--branch_teacher_forcing_decay_epochs", type=int, default=30)
+    parser.add_argument("--confidence_aware_routing", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--routing_confidence_threshold", type=float, default=0.8)
+    parser.add_argument("--routing_margin_threshold", type=float, default=0.35)
+    parser.add_argument("--routing_top_k", type=int, default=2)
+    parser.add_argument("--use_candidate_selector", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--candidate_count", type=int, default=2)
+    parser.add_argument("--candidate_selector_hidden_dim", type=int, default=64)
+    parser.add_argument("--candidate_selector_weight", type=float, default=0.2)
+    parser.add_argument("--candidate_trajectory_weight", type=float, default=0.1)
+    parser.add_argument("--candidate_fde_weight", type=float, default=0.2)
+    parser.add_argument("--candidate_probability_prior_weight", type=float, default=0.3)
+    parser.add_argument("--candidate_base_prior_bias", type=float, default=0.5)
+    parser.add_argument("--candidate_selector_warmup_epochs", type=int, default=10)
+    parser.add_argument("--candidate_switch_confidence_threshold", type=float, default=0.7)
+    parser.add_argument("--candidate_switch_logit_margin", type=float, default=0.3)
+    parser.add_argument("--candidate_include_target_during_training", action=BooleanOptionalAction, default=True)
+    parser.add_argument("--use_route_prototype_prior", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--route_prototype_points", type=int, default=32)
+    parser.add_argument("--route_prototype_weight", type=float, default=0.6)
+    parser.add_argument("--use_subroute_prototype_prior", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--subroute_prototype_points", type=int, default=32)
+    parser.add_argument("--subroute_prototype_weight", type=float, default=0.8)
+    parser.add_argument("--subroute_prototype_distance_scale", type=float, default=0.25)
+    parser.add_argument("--subroute_prototype_direction_weight", type=float, default=0.5)
     parser.add_argument("--use_hierarchical_intent", action=BooleanOptionalAction, default=False)
     parser.add_argument("--hierarchical_mask_strength", type=float, default=1.5)
     parser.add_argument("--use_subroute_contrastive_loss", action=BooleanOptionalAction, default=False)
@@ -1147,6 +1573,60 @@ if __name__ == '__main__':
         raise ValueError("--subroute_intent_weight must be non-negative.")
     if args.subroute_embedding_dim <= 0:
         raise ValueError("--subroute_embedding_dim must be positive.")
+    if args.branch_routing_temperature <= 0:
+        raise ValueError("--branch_routing_temperature must be positive.")
+    if not 0 <= args.branch_teacher_forcing_start <= 1:
+        raise ValueError("--branch_teacher_forcing_start must be between 0 and 1.")
+    if not 0 <= args.branch_teacher_forcing_end <= 1:
+        raise ValueError("--branch_teacher_forcing_end must be between 0 and 1.")
+    if args.branch_teacher_forcing_decay_epochs < 1:
+        raise ValueError("--branch_teacher_forcing_decay_epochs must be at least 1.")
+    if not 0 <= args.routing_confidence_threshold <= 1:
+        raise ValueError("--routing_confidence_threshold must be between 0 and 1.")
+    if not 0 <= args.routing_margin_threshold <= 1:
+        raise ValueError("--routing_margin_threshold must be between 0 and 1.")
+    if args.routing_top_k < 1:
+        raise ValueError("--routing_top_k must be at least 1.")
+    if args.use_candidate_selector and not (
+            args.use_route_embedding and args.use_subroute_embedding and args.use_hierarchical_intent
+    ):
+        raise ValueError(
+            "--use_candidate_selector requires route/subroute embeddings and hierarchical intent."
+        )
+    if args.candidate_count < 2:
+        raise ValueError("--candidate_count must be at least 2.")
+    if args.candidate_selector_hidden_dim < 1:
+        raise ValueError("--candidate_selector_hidden_dim must be positive.")
+    if args.candidate_selector_warmup_epochs < 0:
+        raise ValueError("--candidate_selector_warmup_epochs must be non-negative.")
+    if not 0 <= args.candidate_switch_confidence_threshold <= 1:
+        raise ValueError("--candidate_switch_confidence_threshold must be between 0 and 1.")
+    if args.candidate_switch_logit_margin < 0:
+        raise ValueError("--candidate_switch_logit_margin must be non-negative.")
+    if args.candidate_selector_weight < 0 or args.candidate_trajectory_weight < 0:
+        raise ValueError("Candidate loss weights must be non-negative.")
+    if (
+            args.candidate_fde_weight < 0
+            or args.candidate_probability_prior_weight < 0
+            or args.candidate_base_prior_bias < 0
+    ):
+        raise ValueError("Candidate FDE/prior weights must be non-negative.")
+    if args.use_route_prototype_prior and not args.use_route_intent_head:
+        raise ValueError("--use_route_prototype_prior requires --use_route_intent_head.")
+    if args.route_prototype_points < 2:
+        raise ValueError("--route_prototype_points must be at least 2.")
+    if args.route_prototype_weight < 0:
+        raise ValueError("--route_prototype_weight must be non-negative.")
+    if args.use_subroute_prototype_prior and not args.use_subroute_intent_head:
+        raise ValueError("--use_subroute_prototype_prior requires --use_subroute_intent_head.")
+    if args.subroute_prototype_points < 2:
+        raise ValueError("--subroute_prototype_points must be at least 2.")
+    if args.subroute_prototype_weight < 0:
+        raise ValueError("--subroute_prototype_weight must be non-negative.")
+    if args.subroute_prototype_distance_scale <= 0:
+        raise ValueError("--subroute_prototype_distance_scale must be positive.")
+    if args.subroute_prototype_direction_weight < 0:
+        raise ValueError("--subroute_prototype_direction_weight must be non-negative.")
     if args.subroute_contrastive_weight < 0:
         raise ValueError("--subroute_contrastive_weight must be non-negative.")
     if args.subroute_contrastive_temperature <= 0:
@@ -1221,6 +1701,45 @@ if __name__ == '__main__':
         args.subroute_focal_gamma,
         args.subroute_label_smoothing,
         args.stratify_by_subroute,
+    )
+    logger.info(
+        "Branch routing: summary=%s, temperature=%.3f, hard_subroute=%s, "
+        "teacher_forcing=%s(start=%.3f,end=%.3f,decay_epochs=%d), "
+        "confidence_aware=%s(threshold=%.3f,margin=%.3f,top_k=%d), "
+        "route_prototype=%s(points=%d,weight=%.3f), "
+        "subroute_prototype=%s(points=%d,weight=%.3f,distance_scale=%.3f,direction_weight=%.3f), "
+        "candidate_selector=%s(branches=%d,hidden=%d,selector_w=%.3f,traj_w=%.3f,fde_w=%.3f,prior_w=%.3f,base_bias=%.3f,warmup=%d,switch_p=%.3f,switch_margin=%.3f,include_target=%s).",
+        args.intent_summary_mode,
+        args.branch_routing_temperature,
+        args.hard_subroute_routing,
+        args.use_branch_teacher_forcing,
+        args.branch_teacher_forcing_start,
+        args.branch_teacher_forcing_end,
+        args.branch_teacher_forcing_decay_epochs,
+        args.confidence_aware_routing,
+        args.routing_confidence_threshold,
+        args.routing_margin_threshold,
+        args.routing_top_k,
+        args.use_route_prototype_prior,
+        args.route_prototype_points,
+        args.route_prototype_weight,
+        args.use_subroute_prototype_prior,
+        args.subroute_prototype_points,
+        args.subroute_prototype_weight,
+        args.subroute_prototype_distance_scale,
+        args.subroute_prototype_direction_weight,
+        args.use_candidate_selector,
+        args.candidate_count,
+        args.candidate_selector_hidden_dim,
+        args.candidate_selector_weight,
+        args.candidate_trajectory_weight,
+        args.candidate_fde_weight,
+        args.candidate_probability_prior_weight,
+        args.candidate_base_prior_bias,
+        args.candidate_selector_warmup_epochs,
+        args.candidate_switch_confidence_threshold,
+        args.candidate_switch_logit_margin,
+        args.candidate_include_target_during_training,
     )
     logger.info(
         "Subroute balance: class_weight=%s(alpha=%.3f,max_ratio=%.3f), "
@@ -1506,6 +2025,37 @@ if __name__ == '__main__':
         lr = 2e-4
         route_class_count = len(route_classes) if args.use_route_intent_head else 0
         subroute_class_count = len(subroute_classes) if args.use_subroute_intent_head else 0
+        route_prototypes = None
+        subroute_prototypes = None
+        prototype_tracks = [train_data[i] for i in train_indices]
+        if args.use_route_prototype_prior:
+            route_prototypes = build_class_prototypes(
+                prototype_tracks,
+                train_route_track_ids,
+                route_class_count,
+                args.route_prototype_points,
+            )
+            logger.info(
+                "Fold %d/%d built route prototypes from %d training tracks only, shape %s.",
+                fold,
+                args.folds,
+                len(prototype_tracks),
+                tuple(route_prototypes.shape),
+            )
+        if args.use_subroute_prototype_prior:
+            subroute_prototypes = build_class_prototypes(
+                prototype_tracks,
+                train_subroute_track_ids,
+                subroute_class_count,
+                args.subroute_prototype_points,
+            )
+            logger.info(
+                "Fold %d/%d built subroute prototypes from %d training tracks only, shape %s.",
+                fold,
+                args.folds,
+                len(prototype_tracks),
+                tuple(subroute_prototypes.shape),
+            )
         model = iTentformer(input_size_tcn, input_size, local_intent_size, output_size, concat_dim, input_length,
                               num_channels, kernel_size, d_model, dropout,
                               subroute_classes=subroute_class_count,
@@ -1518,7 +2068,30 @@ if __name__ == '__main__':
                               route_embedding_dim=args.route_embedding_dim,
                               use_hierarchical_intent=args.use_hierarchical_intent,
                               route_to_subroute_mask=route_to_subroute_mask,
-                              hierarchical_mask_strength=args.hierarchical_mask_strength).to(device)
+                              hierarchical_mask_strength=args.hierarchical_mask_strength,
+                              intent_summary_mode=args.intent_summary_mode,
+                              branch_routing_temperature=args.branch_routing_temperature,
+                              hard_subroute_routing=args.hard_subroute_routing,
+                              route_prototypes=route_prototypes,
+                              route_prototype_prior_weight=(
+                                  args.route_prototype_weight
+                                  if args.use_route_prototype_prior else 0.0
+                              ),
+                              subroute_prototypes=subroute_prototypes,
+                              prototype_prior_weight=(
+                                  args.subroute_prototype_weight
+                                  if args.use_subroute_prototype_prior else 0.0
+                              ),
+                              prototype_distance_scale=args.subroute_prototype_distance_scale,
+                              prototype_direction_weight=args.subroute_prototype_direction_weight,
+                              confidence_aware_routing=args.confidence_aware_routing,
+                              routing_confidence_threshold=args.routing_confidence_threshold,
+                              routing_margin_threshold=args.routing_margin_threshold,
+                              routing_top_k=args.routing_top_k,
+                              use_candidate_selector=args.use_candidate_selector,
+                              candidate_selector_hidden_dim=args.candidate_selector_hidden_dim,
+                              candidate_probability_prior_weight=args.candidate_probability_prior_weight,
+                              candidate_base_prior_bias=args.candidate_base_prior_bias).to(device)
         awl = AutomaticWeightedLoss(2).cuda()
         if fold == 1:
             model_logger.info("number of parameters: %.6e", count_parameters(model))
@@ -1539,6 +2112,7 @@ if __name__ == '__main__':
         early_stopping = EarlyStopping(patience=args.patience, verbose=False)
 
         if args.eval_only:
+            candidate_selector_runtime_active = args.use_candidate_selector
             checkpoint_path = args.checkpoint_path or model_name
             if not Path(checkpoint_path).exists():
                 raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -1587,6 +2161,25 @@ if __name__ == '__main__':
 
         # trainning
         for ep in range(1, args.epochs + 1):
+            candidate_selector_runtime_active = (
+                args.use_candidate_selector
+                and ep > args.candidate_selector_warmup_epochs
+            )
+            logger.info(
+                "Branch teacher forcing, fold %d/%d, epoch %03d, ratio %.3f.",
+                fold,
+                args.folds,
+                ep,
+                branch_teacher_forcing_ratio(ep),
+            )
+            logger.info(
+                "Candidate selector runtime, fold %d/%d, epoch %03d, active=%s (warmup=%d).",
+                fold,
+                args.folds,
+                ep,
+                candidate_selector_runtime_active,
+                args.candidate_selector_warmup_epochs,
+            )
             train_loss = train(ep, parallel_train=False)
             logger.info("Training, fold %d/%d, epoch %03d, loss %.5f, lr %.6e.", fold, args.folds, ep, train_loss, lr)
 
@@ -1679,6 +2272,7 @@ if __name__ == '__main__':
             monitor_score_list.append(monitor_score)
 
         model = load_model_checkpoint(model_name, model)
+        candidate_selector_runtime_active = args.use_candidate_selector
         """
         You can test the model by applying the training process annotation to the following code
         """
