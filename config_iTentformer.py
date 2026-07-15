@@ -29,6 +29,13 @@ class Config:
     #  delta_Course, delta_Lon, delta_Lat, delta_SOG, delta_vx, delta_vy, UnixTime]
     data_path = "dataset/dma_raw_2023_06_07_08/dma_itentformer_ti_4class_revnorm_lasthit.pkl"
 
+    # 由utils/build_dma_voyage_context.py生成，与当前三个月轨迹数据逐点对齐。
+    # 侧车只保存每个历史时刻之前最后已知的船型、吃水、Destination等语义信息。
+    voyage_context_path = "dataset/dma_raw_2023_06_07_08/dma_voyage_context_2023_06_07_08.pkl"
+
+    # 加入船舶静态/航次信息后必须按MMSI分组，避免同一艘船同时出现在训练和测试中。
+    group_folds_by_mmsi = True
+
     # 每条轨迹对应的航路类别标签。当前包含 OA / OB1 / OB2 / OC 四类。
     # 这个文件不是模型输入特征，主要用于：
     # 1. K 折划分时尽量让每折都有各类航路；
@@ -49,9 +56,19 @@ class Config:
     use_route_embedding = True
     route_embedding_dim = 16
 
+    # 大类也使用分阶段监督。OA/OB1/OB2/OC 在 O 区域共享航段时不强迫提前硬选，
+    # 当历史轨迹接近主分叉并与某一大类原型明显匹配后，再恢复硬分类和标签教师强制。
+    use_route_decidability = True
+    route_decidable_min_weight = 0.05
+    route_decidable_confidence_threshold = 0.60
+    route_decidable_margin_threshold = 0.10
+    route_decidable_direction_points = 4
+    route_decidable_threshold = 0.50
+    route_undecidable_soft_weight = 0.10
+
     # 细分子航路标签，由 utils/discover_subroutes.py 生成。
     # 它会把 OA/OB1/OB2/OC 继续细化为 OA_S00、OB1_S01、OC_S02 等小分支。
-    subroute_labels_path = "dataset/dma_raw_2023_06_07_08/dma_subroutes_ti_4class_local_fused_v4_labels.json"
+    subroute_labels_path = "dataset/dma_raw_2023_06_07_08/dma_subroutes_ti_4class_compact6_v1_labels.json"
 
     # True：K 折划分时按子航路分层，比只按 OA/OB1/OB2/OC 更细。
     # 如果子航路数量太多且某些类样本很少，可以改回 False。
@@ -70,9 +87,13 @@ class Config:
     # 相比只做全历史平均，它更容易捕捉接近分岔口和刚开始转向的信号。
     intent_summary_mode = "mean_last_delta"
 
-    # 小于 1 会让分支概率更集中。hard routing 会在推理时明确选择一条子航路，
-    # 避免多个子航路 embedding 被平均后预测到两条航路中间。
+    # 旧版共用温度，保留作兼容回退；下面两个独立温度才是当前实验实际使用值。
     branch_routing_temperature = 0.7
+
+    # 大类旧日志存在明显过度自信，因此把大类温度调高到 1.30，让概率更平缓。
+    # 小类保持略低温度 0.90，在已经可判别时仍能形成明确分支，但不再像 0.70 那样过尖。
+    route_routing_temperature = 1.30
+    subroute_routing_temperature = 0.90
     hard_subroute_routing = True
 
     # 高置信度时明确选择第一名；置信度不足或前两名接近时，保留 Top-2 候选概率。
@@ -82,20 +103,105 @@ class Config:
     routing_margin_threshold = 0.35
     routing_top_k = 2
 
+    # 学习“当前历史是否已经足以判断航路”。该头只读取历史轨迹，不读取真实未来。
+    # 只有类别置信度、前两名间隔和这个可判别概率同时过关，才允许硬选；否则保留 Top-2。
+    use_learned_decidability = True
+    decidability_hidden_dim = 64
+    route_decidability_gate_threshold = 0.65
+    subroute_decidability_gate_threshold = 0.60
+    route_decidability_loss_weight = 0.10
+    subroute_decidability_loss_weight = 0.10
+
     # 显式生成两条独立候选轨迹，并由学习型筛选器最终只选择一条输出。
     # 训练时用候选轨迹真实 ADE/FDE 的优胜者监督筛选器；推理时筛选器不读取真实未来。
     use_candidate_selector = True
     candidate_count = 2
+    candidate_subroutes_per_route = 2
+
+    # 紧凑版只有 6 个子航路，直接把全部子航路放进候选池并自动绑定所属大类。
+    # 这样低先验的小分支也有被千问反推纠正的机会；正确子航路不在候选池时任何重排器都无法恢复。
+    candidate_pool_strategy = "all_subroutes"
+    candidate_max_subroutes = 8
     candidate_selector_hidden_dim = 64
-    candidate_selector_weight = 0.2
-    candidate_trajectory_weight = 0.0
+    candidate_selector_weight = 0.5
+    candidate_trajectory_weight = 0.08
     candidate_fde_weight = 0.2
-    candidate_probability_prior_weight = 0.3
-    candidate_base_prior_bias = 0.5
+    candidate_probability_prior_weight = 0.15
+    candidate_base_prior_bias = 0.0
+    candidate_cost_temperature = 0.35
+    candidate_cost_regression_weight = 0.1
     candidate_selector_warmup_epochs = 10
-    candidate_switch_confidence_threshold = 0.7
-    candidate_switch_logit_margin = 0.3
+    # 初始切换规则；训练完成后会用验证集自动校准，最终不一定沿用这组阈值。
+    # 校准目标是降低候选轨迹代价，不是盲目提高 branch_switch。
+    candidate_switch_confidence_threshold = 0.45
+    candidate_switch_logit_margin = 0.15
+
+    # 验证集校准候选切换阈值。max_switch_ratio 防止选择器为了追 oracle 过度乱切。
+    use_candidate_selection_calibration = True
+    candidate_calibration_max_switch_ratio = 0.50
+    candidate_calibration_min_cost_gain = 0.0
     candidate_include_target_during_training = True
+
+    # 千问候选重排器。主模型训练结束后，冻结本地 Qwen3-1.7B，使用数值软提示比较：
+    # 基础预测 + Top-2 大类各自 Top-2 子航路，共 5 条候选，最终仍只输出一条。
+    # 千问不直接生成经纬度，也不会把 4GB 权重复制进 iTentformer checkpoint；
+    # 这里只训练并单独保存数值适配器和打分头，便于关闭后做消融实验。
+    use_qwen_reranker = True
+    qwen_model_path = r"D:\Jason1982\wsl\Models\Qwen3-1.7B"
+
+    # None：每折自动保存为 model_dir/model_prefix_Kx_qwen_reranker.pt。
+    # eval_only=True 时也会从这个位置自动加载；需要手工指定时再填写完整路径。
+    qwen_adapter_path = None
+
+    # 第二阶段只抽取一部分窗口，优先学习原筛选器选错、候选存在分歧的困难样本。
+    # 这不会重新训练主模型，显存和时间都比把千问塞进 50 轮主训练稳定得多。
+    qwen_reranker_epochs = 3
+    qwen_reranker_batch_size = 4
+    qwen_train_max_windows = 4096
+    qwen_valid_max_windows = 1024
+    qwen_hard_sample_ratio = 0.7
+
+    # 数值特征先映射成 2048 维 Qwen soft token；仅下面的小适配器参与训练。
+    qwen_adapter_dim = 64
+    qwen_reranker_lr = 2e-4
+    qwen_reranker_weight_decay = 1e-4
+    qwen_reranker_clip = 1.0
+    qwen_gradient_checkpointing = True
+
+    # 千问分数与原候选筛选器分数的融合权重。过大可能让小样本重排器反客为主。
+    qwen_reranker_weight = 0.5
+    qwen_cost_temperature = 0.25
+    qwen_cost_regression_weight = 0.2
+    qwen_fused_loss_weight = 0.5
+
+    # 反事实重排额外强化“真实优胜候选必须压过错误候选”，并重点照顾同一大类内选错子路的样本。
+    qwen_pairwise_weight = 0.4
+    qwen_pairwise_margin = 0.3
+    qwen_pairwise_min_cost_gap = 0.01
+    qwen_same_route_hard_weight = 1.5
+    qwen_calibration_max_apply_ratio = 0.35
+    qwen_context_max_tokens = 64
+    qwen_context_dropout = 0.15
+
+    # 只在大类置信度低、前两类接近，或候选筛选器前两名接近时调用千问。
+    # 高置信度简单样本继续走原模型，减少推理耗时，也保护已经预测正确的大类。
+    qwen_uncertain_only = True
+    qwen_uncertainty_confidence_threshold = 0.85
+    qwen_uncertainty_margin_threshold = 0.25
+
+    # 千问只重点学习“原选择器会选错、但候选池里有明显更好轨迹”的窗口。
+    # min_oracle_gain 越大，样本越纯但数量越少；winner_gap 过滤掉多个候选几乎一样好的模糊样本。
+    # gain_weight 会给高收益纠错样本更高 loss 权重，避免被大量普通样本淹没。
+    qwen_focus_high_gain = True
+    qwen_min_oracle_gain_nmi = 0.03
+    qwen_min_winner_gap_nmi = 0.02
+    qwen_gain_weight = 2.0
+
+    # 只有验证集候选优胜者准确率至少提升 0.5 个百分点，正式测试才启用千问。
+    # 如果没有达到，适配器仍会保存供诊断，但自动回退到原候选筛选器，避免负优化。
+    qwen_require_validation_gain = True
+    qwen_min_validation_gain = 0.5
+    qwen_min_validation_cost_gain = 0.005
 
     # 训练前期用真实子航路帮助预测器学会“不同标签对应不同走向”，
     # 随训练逐步切换为模型自己的分类结果，减小训练和推理之间的差异。
@@ -124,6 +230,11 @@ class Config:
     use_hierarchical_intent = True
     hierarchical_mask_strength = 1.5
 
+    # 大类判断不可靠时自动减弱“大类压小类”的层级约束，避免大类选错后封死正确小类。
+    # min_scale 是最弱时仍保留的约束比例，不能为 0，否则小类会完全失去大类结构信息。
+    confidence_gated_hierarchy = True
+    hierarchy_min_scale = 0.15
+
     # 子航路对比损失。同一子航路的隐藏特征会被拉近，不同子航路会被拉远。
     use_subroute_contrastive_loss = True
     subroute_contrastive_weight = 0.05
@@ -134,6 +245,19 @@ class Config:
     use_subroute_focal_loss = True
     subroute_focal_gamma = 1.5
     subroute_label_smoothing = 0.02
+
+    # 分阶段子航路监督：只使用历史窗口判断“此刻是否已经能看出分支意图”。
+    # 分叉前，各子航路历史几乎重合，最终标签只保留 5% 的硬分类权重，并学习同一大类内的软分布；
+    # 接近或进入分叉后，历史与真实子航路原型逐渐匹配，硬标签、对比损失和教师强制才逐步恢复。
+    # 原型只由当前折训练集建立，计算可判别性时不读取该窗口的未来点，验证/测试不会泄漏。
+    use_subroute_decidability = True
+    subroute_decidable_min_weight = 0.05
+    subroute_decidable_confidence_threshold = 0.60
+    subroute_decidable_margin_threshold = 0.10
+    subroute_decidable_direction_points = 4
+    subroute_decidable_threshold = 0.50
+    subroute_decidable_contrastive_threshold = 0.50
+    subroute_undecidable_soft_weight = 0.15
 
     # 子航路分类 class weight。只加在子航路分类辅助头上，不直接改变轨迹回归 loss。
     # alpha 越大越照顾小类；0 表示不按频次加权，1 表示强逆频次加权。
@@ -155,7 +279,7 @@ class Config:
     # ======================================================================
     # 保存模型文件时用的前缀。最终通常类似：
     # save_models/dma_2023_06_07_08_ti_4class_K1.pt
-    model_prefix = "dma_2023_06_07_08_ti_4class_candidate_v3"
+    model_prefix = "dma_2023_06_07_08_ti_4class_candidate_v11_qwen_reverse_compact6_hist3h_pred3h"
 
     # 模型 checkpoint 保存目录。
     model_dir = "save_models"
@@ -228,6 +352,12 @@ class Config:
     # 1：窗口最密，训练样本最多，但训练更慢；
     # 20：窗口更稀，训练快，但样本少，容易学不充分。
     window_stride = 1
+
+    # DMA每15分钟一个点；13个历史点首尾跨度为12个间隔，即3小时历史轨迹。
+    input_length = 13
+
+    # 12个未来点对应3小时预测。修改任一长度后都需要重新训练模型。
+    target_length = 12
 
     # ======================================================================
     # 5. 测试集可视化

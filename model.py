@@ -222,13 +222,18 @@ class TransformerEncoder(nn.Module):
 
 
 class TrajModel(nn.Module):
-    def __init__(self, input_dim, d_model, output_dim, concat_dim, input_length, dropout):
+    def __init__(self, input_dim, d_model, output_dim, concat_dim, input_length, target_length, dropout):
         super(TrajModel, self).__init__()
-        self.Fusion = FusionBlock(d_model, input_length, dropout)
-        self.input_embedding = nn.Linear(input_dim, d_model)
-        self.concat_linear = nn.Linear(concat_dim * 10, output_dim * 10)
-        self.fc = nn.Linear(d_model, 10)
-        self.fc2 = nn.Linear(d_model, 10)
+        self.input_length = int(input_length)
+        self.target_length = int(target_length)
+        self.Fusion = FusionBlock(d_model, self.target_length, dropout)
+        self.input_embedding = nn.Linear(self.input_length, d_model)
+        self.concat_linear = nn.Linear(
+            concat_dim * self.target_length,
+            output_dim * self.target_length,
+        )
+        self.fc = nn.Linear(d_model, self.target_length)
+        self.fc2 = nn.Linear(d_model, self.target_length)
 
         self.encoder_layer = TransformerEncoderLayer(d_model=d_model, nhead=4, dim_feedforward=512, dropout=dropout)
         self.encoder = TransformerEncoder(self.encoder_layer, num_layers=1)
@@ -242,15 +247,22 @@ class TrajModel(nn.Module):
         src = self.input_embedding(src).cuda()
         src = self.positional_encoding(src).cuda()
 
-        encode = self.encoder(src, src_key_padding_mask=None)  # 16*8*128
-        encode = self.fc(encode)  # 16*8*10
-        memory_cat = torch.cat((encode.transpose(1, 2), intent), dim=-1)  # 16*10*40
-        memory_cat, attn_weights = self.Fusion(memory_cat)  # 16*40*128
-        memory_cat = self.fc2(memory_cat)  # 16*40*10
+        encode = self.encoder(src, src_key_padding_mask=None)
+        encode = self.fc(encode)
+        if intent.size(1) != self.target_length:
+            intent = F.interpolate(
+                intent.transpose(1, 2),
+                size=self.target_length,
+                mode="linear",
+                align_corners=False,
+            ).transpose(1, 2)
+        memory_cat = torch.cat((encode.transpose(1, 2), intent), dim=-1)
+        memory_cat, attn_weights = self.Fusion(memory_cat)
+        memory_cat = self.fc2(memory_cat)
 
         memory_cat = memory_cat.reshape(memory_cat.size(0), -1)
-        memory_cat = self.concat_linear(memory_cat)  # 16*400->16*40
-        out = memory_cat.reshape(memory_cat.size(0), 10, -1)
+        memory_cat = self.concat_linear(memory_cat)
+        out = memory_cat.reshape(memory_cat.size(0), self.target_length, -1)
 
         return out, attn_weights
 
@@ -258,23 +270,38 @@ class TrajModel(nn.Module):
 class iTentformer(nn.Module):
 
     def __init__(self, input_size_tcn, input_size, local_intent_size, output_size, concat_dim, input_length,
+                 target_length,
                  num_channels, kernel_size, d_model, dropout, subroute_classes=0,
                  use_subroute_intent_head=False, use_subroute_embedding=False, subroute_embedding_dim=16,
                  route_classes=0, use_route_intent_head=False, use_route_embedding=False, route_embedding_dim=16,
                  use_hierarchical_intent=False, route_to_subroute_mask=None, hierarchical_mask_strength=1.0,
                  intent_summary_mode="mean", branch_routing_temperature=1.0,
+                 route_routing_temperature=None, subroute_routing_temperature=None,
                  hard_subroute_routing=False, subroute_prototypes=None,
                  prototype_prior_weight=0.0, prototype_distance_scale=0.25,
                  prototype_direction_weight=0.5, route_prototypes=None,
                  route_prototype_prior_weight=0.0, confidence_aware_routing=False,
                  routing_confidence_threshold=0.8, routing_margin_threshold=0.35,
+                 use_learned_decidability=False, decidability_hidden_dim=64,
+                 route_decidability_gate_threshold=0.65,
+                 subroute_decidability_gate_threshold=0.60,
+                 confidence_gated_hierarchy=False, hierarchy_min_scale=0.15,
                  routing_top_k=2, use_candidate_selector=False,
                  candidate_selector_hidden_dim=64,
                  candidate_probability_prior_weight=0.3,
                  candidate_base_prior_bias=0.5):
         super().__init__()
+        self.target_length = int(target_length)
         self.TCN = TCN(input_size_tcn, local_intent_size, num_channels, kernel_size, dropout=dropout)
-        self.TrajModel = TrajModel(input_size, d_model, output_size, concat_dim, input_length, dropout)
+        self.TrajModel = TrajModel(
+            input_size,
+            d_model,
+            output_size,
+            concat_dim,
+            input_length,
+            target_length,
+            dropout,
+        )
         self.use_route_intent_head = use_route_intent_head and route_classes > 0
         self.use_route_embedding = use_route_embedding and self.use_route_intent_head
         self.route_classes = route_classes
@@ -290,6 +317,16 @@ class iTentformer(nn.Module):
         self.hierarchical_mask_strength = hierarchical_mask_strength
         self.intent_summary_mode = intent_summary_mode
         self.branch_routing_temperature = branch_routing_temperature
+        self.route_routing_temperature = (
+            branch_routing_temperature
+            if route_routing_temperature is None
+            else route_routing_temperature
+        )
+        self.subroute_routing_temperature = (
+            branch_routing_temperature
+            if subroute_routing_temperature is None
+            else subroute_routing_temperature
+        )
         self.hard_subroute_routing = hard_subroute_routing
         self.prototype_prior_weight = prototype_prior_weight
         self.prototype_distance_scale = prototype_distance_scale
@@ -299,6 +336,11 @@ class iTentformer(nn.Module):
         self.routing_confidence_threshold = routing_confidence_threshold
         self.routing_margin_threshold = routing_margin_threshold
         self.routing_top_k = routing_top_k
+        self.use_learned_decidability = use_learned_decidability
+        self.route_decidability_gate_threshold = route_decidability_gate_threshold
+        self.subroute_decidability_gate_threshold = subroute_decidability_gate_threshold
+        self.confidence_gated_hierarchy = confidence_gated_hierarchy
+        self.hierarchy_min_scale = hierarchy_min_scale
         self.use_candidate_selector = (
             use_candidate_selector
             and self.use_route_embedding
@@ -336,6 +378,14 @@ class iTentformer(nn.Module):
                 nn.Dropout(dropout),
                 nn.Linear(feature_dim, route_classes),
             )
+            if self.use_learned_decidability:
+                self.route_decidability_head = nn.Sequential(
+                    nn.LayerNorm(feature_dim),
+                    nn.Linear(feature_dim, decidability_hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(decidability_hidden_dim, 1),
+                )
             if self.use_route_embedding:
                 self.route_embedding = nn.Embedding(route_classes, route_embedding_dim)
                 self.route_to_intent = nn.Linear(route_embedding_dim, feature_dim)
@@ -348,6 +398,14 @@ class iTentformer(nn.Module):
                 nn.Dropout(dropout),
                 nn.Linear(feature_dim, subroute_classes),
             )
+            if self.use_learned_decidability:
+                self.subroute_decidability_head = nn.Sequential(
+                    nn.LayerNorm(feature_dim),
+                    nn.Linear(feature_dim, decidability_hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(decidability_hidden_dim, 1),
+                )
             if self.use_subroute_embedding:
                 self.subroute_embedding = nn.Embedding(subroute_classes, subroute_embedding_dim)
                 self.subroute_to_intent = nn.Linear(subroute_embedding_dim, feature_dim)
@@ -381,8 +439,20 @@ class iTentformer(nn.Module):
         )
         return self.intent_summary(history_summary)
 
-    def _routing_prob(self, logits, target=None, teacher_forcing_ratio=0.0, hard=False):
-        temperature = max(float(self.branch_routing_temperature), 1e-6)
+    def _routing_prob(
+            self,
+            logits,
+            target=None,
+            teacher_forcing_ratio=0.0,
+            hard=False,
+            teacher_forcing_weight=None,
+            temperature=None,
+            decidability_logits=None,
+            decidability_gate_threshold=0.5,
+    ):
+        if temperature is None:
+            temperature = self.branch_routing_temperature
+        temperature = max(float(temperature), 1e-6)
         soft_prob = torch.softmax(logits / temperature, dim=-1)
         routing_prob = soft_prob
 
@@ -399,6 +469,7 @@ class iTentformer(nn.Module):
                 top_values, top_indices = torch.topk(soft_prob, k=top_k, dim=-1)
                 top_k_prob = torch.zeros_like(soft_prob).scatter(-1, top_indices, top_values)
                 top_k_prob = top_k_prob / top_k_prob.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+                uncertain_prob = top_k_prob
                 top_two = torch.topk(soft_prob, k=2, dim=-1).values
                 confidence = top_two[:, :1]
                 margin = top_two[:, :1] - top_two[:, 1:2]
@@ -406,7 +477,21 @@ class iTentformer(nn.Module):
                     (confidence >= self.routing_confidence_threshold)
                     & (margin >= self.routing_margin_threshold)
                 )
-                routing_prob = torch.where(confident, hard_prob, top_k_prob)
+                if self.use_learned_decidability and decidability_logits is not None:
+                    decidability_prob = torch.sigmoid(decidability_logits).reshape(-1, 1)
+                    uniform_top_k = torch.zeros_like(soft_prob).scatter(
+                        -1,
+                        top_indices,
+                        torch.ones_like(top_values),
+                    ) / float(top_k)
+                    uncertain_prob = (
+                        decidability_prob * top_k_prob
+                        + (1.0 - decidability_prob) * uniform_top_k
+                    )
+                    confident = confident & (
+                        decidability_prob >= float(decidability_gate_threshold)
+                    )
+                routing_prob = torch.where(confident, hard_prob, uncertain_prob)
             else:
                 routing_prob = hard_prob
 
@@ -415,9 +500,20 @@ class iTentformer(nn.Module):
                 target.long(),
                 num_classes=soft_prob.size(-1),
             ).to(dtype=soft_prob.dtype)
+            teacher_probability = torch.full(
+                (soft_prob.size(0), 1),
+                float(teacher_forcing_ratio),
+                device=soft_prob.device,
+                dtype=soft_prob.dtype,
+            )
+            if teacher_forcing_weight is not None:
+                teacher_probability = teacher_probability * teacher_forcing_weight.reshape(-1, 1).to(
+                    device=soft_prob.device,
+                    dtype=soft_prob.dtype,
+                ).clamp(0.0, 1.0)
             teacher_mask = torch.rand(
                 soft_prob.size(0), 1, device=soft_prob.device
-            ) < teacher_forcing_ratio
+            ) < teacher_probability
             routing_prob = torch.where(teacher_mask, teacher_prob, routing_prob)
 
         return routing_prob
@@ -480,10 +576,9 @@ class iTentformer(nn.Module):
             raw_output.size(2),
         )
 
-    def score_candidates(
+    def candidate_numeric_features(
             self,
             src,
-            intent_feature,
             route_logits,
             subroute_logits,
             candidate_route_ids,
@@ -491,12 +586,14 @@ class iTentformer(nn.Module):
             candidate_value_outputs,
             candidate_is_base=None,
     ):
-        if not self.use_candidate_selector:
-            raise RuntimeError("Candidate selector is disabled.")
-
-        candidate_count = candidate_route_ids.size(1)
-        route_log_prob = F.log_softmax(route_logits, dim=-1).gather(1, candidate_route_ids)
-        subroute_log_prob = F.log_softmax(subroute_logits, dim=-1).gather(1, candidate_subroute_ids)
+        route_log_prob = F.log_softmax(
+            route_logits / max(float(self.route_routing_temperature), 1e-6),
+            dim=-1,
+        ).gather(1, candidate_route_ids)
+        subroute_log_prob = F.log_softmax(
+            subroute_logits / max(float(self.subroute_routing_temperature), 1e-6),
+            dim=-1,
+        ).gather(1, candidate_subroute_ids)
 
         history_velocity = src[:, -1, 1:3] - src[:, -2, 1:3]
         candidate_velocity = (
@@ -530,10 +627,7 @@ class iTentformer(nn.Module):
         if candidate_is_base is None:
             candidate_is_base = torch.zeros_like(continuity_error)
 
-        route_emb = self.route_embedding(candidate_route_ids)
-        subroute_emb = self.subroute_embedding(candidate_subroute_ids)
-        expanded_feature = intent_feature[:, None, :].expand(-1, candidate_count, -1)
-        numeric_features = torch.stack(
+        return torch.stack(
             (
                 route_log_prob,
                 subroute_log_prob,
@@ -544,6 +638,38 @@ class iTentformer(nn.Module):
             ),
             dim=-1,
         )
+
+    def score_candidates(
+            self,
+            src,
+            intent_feature,
+            route_logits,
+            subroute_logits,
+            candidate_route_ids,
+            candidate_subroute_ids,
+            candidate_value_outputs,
+            candidate_is_base=None,
+    ):
+        if not self.use_candidate_selector:
+            raise RuntimeError("Candidate selector is disabled.")
+
+        candidate_count = candidate_route_ids.size(1)
+        numeric_features = self.candidate_numeric_features(
+            src,
+            route_logits,
+            subroute_logits,
+            candidate_route_ids,
+            candidate_subroute_ids,
+            candidate_value_outputs,
+            candidate_is_base=candidate_is_base,
+        )
+        route_log_prob = numeric_features[:, :, 0]
+        subroute_log_prob = numeric_features[:, :, 1]
+        if candidate_is_base is None:
+            candidate_is_base = torch.zeros_like(route_log_prob)
+        route_emb = self.route_embedding(candidate_route_ids)
+        subroute_emb = self.subroute_embedding(candidate_subroute_ids)
+        expanded_feature = intent_feature[:, None, :].expand(-1, candidate_count, -1)
         selector_input = torch.cat(
             (
                 expanded_feature.detach(),
@@ -561,17 +687,30 @@ class iTentformer(nn.Module):
             + self.candidate_base_prior_bias * candidate_is_base
         )
 
-    def forward(self, delta, src, route_target=None, subroute_target=None, teacher_forcing_ratio=0.0):
+    def forward(
+            self,
+            delta,
+            src,
+            route_target=None,
+            subroute_target=None,
+            teacher_forcing_ratio=0.0,
+            route_supervision_weight=None,
+            subroute_supervision_weight=None,
+    ):
         intent = self.TCN(delta)
         route_logits = None
         route_feature = None
+        route_decidability_logits = None
         subroute_logits = None
         subroute_feature = None
+        subroute_decidability_logits = None
         intent_feature = self._intent_feature(intent)
 
         if self.use_route_intent_head:
             route_feature = intent_feature
             route_logits = self.route_head(route_feature)
+            if self.use_learned_decidability:
+                route_decidability_logits = self.route_decidability_head(route_feature).squeeze(-1)
             route_prototype_prior = self._prototype_prior_logits(src, self.route_prototypes)
             if route_prototype_prior is not None and self.route_prototype_prior_weight > 0:
                 route_logits = route_logits + self.route_prototype_prior_weight * route_prototype_prior
@@ -580,6 +719,10 @@ class iTentformer(nn.Module):
                 target=route_target,
                 teacher_forcing_ratio=teacher_forcing_ratio,
                 hard=self.confidence_aware_routing,
+                teacher_forcing_weight=route_supervision_weight,
+                temperature=self.route_routing_temperature,
+                decidability_logits=route_decidability_logits,
+                decidability_gate_threshold=self.route_decidability_gate_threshold,
             )
             if self.use_route_embedding:
                 route_emb = torch.matmul(route_prob, self.route_embedding.weight)
@@ -589,18 +732,42 @@ class iTentformer(nn.Module):
         if self.use_subroute_intent_head:
             subroute_feature = intent_feature
             subroute_logits = self.subroute_head(subroute_feature)
+            if self.use_learned_decidability:
+                subroute_decidability_logits = self.subroute_decidability_head(subroute_feature).squeeze(-1)
             prototype_prior = self._prototype_prior_logits(src, self.subroute_prototypes)
             if prototype_prior is not None:
                 subroute_logits = subroute_logits + self.prototype_prior_weight * prototype_prior
             if self.use_hierarchical_intent and self.route_to_subroute_mask is not None:
                 subroute_gate = torch.matmul(route_prob, self.route_to_subroute_mask).clamp_min(1e-6)
-                subroute_logits = subroute_logits + self.hierarchical_mask_strength * torch.log(subroute_gate)
+                hierarchy_scale = self.hierarchical_mask_strength
+                if self.confidence_gated_hierarchy:
+                    route_soft_prob = torch.softmax(
+                        route_logits / max(float(self.route_routing_temperature), 1e-6),
+                        dim=-1,
+                    )
+                    route_confidence = route_soft_prob.max(dim=-1).values
+                    if route_decidability_logits is None:
+                        route_reliability = route_confidence
+                    else:
+                        route_reliability = torch.sigmoid(route_decidability_logits)
+                    reliability_scale = (
+                        self.hierarchy_min_scale
+                        + (1.0 - self.hierarchy_min_scale)
+                        * route_confidence
+                        * route_reliability
+                    ).detach()
+                    hierarchy_scale = self.hierarchical_mask_strength * reliability_scale.unsqueeze(-1)
+                subroute_logits = subroute_logits + hierarchy_scale * torch.log(subroute_gate)
             if self.use_subroute_embedding:
                 subroute_prob = self._routing_prob(
                     subroute_logits,
                     target=subroute_target,
                     teacher_forcing_ratio=teacher_forcing_ratio,
                     hard=self.hard_subroute_routing,
+                    teacher_forcing_weight=subroute_supervision_weight,
+                    temperature=self.subroute_routing_temperature,
+                    decidability_logits=subroute_decidability_logits,
+                    decidability_gate_threshold=self.subroute_decidability_gate_threshold,
                 )
                 subroute_emb = torch.matmul(subroute_prob, self.subroute_embedding.weight)
                 intent_bias = self.subroute_to_intent(subroute_emb).unsqueeze(1)
@@ -608,7 +775,23 @@ class iTentformer(nn.Module):
 
         out, _ = self.TrajModel(src.transpose(1, 2), intent)
         out_intent = self.TCN.linear_intent(intent)
+        if out_intent.size(1) != self.target_length:
+            out_intent = F.interpolate(
+                out_intent.transpose(1, 2),
+                size=self.target_length,
+                mode="linear",
+                align_corners=False,
+            ).transpose(1, 2)
 
         if self.use_route_intent_head or self.use_subroute_intent_head:
-            return out_intent, out, route_logits, subroute_logits, route_feature, subroute_feature
+            return (
+                out_intent,
+                out,
+                route_logits,
+                subroute_logits,
+                route_feature,
+                subroute_feature,
+                route_decidability_logits,
+                subroute_decidability_logits,
+            )
         return out_intent, out

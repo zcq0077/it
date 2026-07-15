@@ -119,6 +119,7 @@ def main():
         output_size=4,
         concat_dim=40,
         input_length=INPUT_LENGTH,
+        target_length=TARGET_LENGTH,
         num_channels=[32] * 2,
         kernel_size=3,
         d_model=128,

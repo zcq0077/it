@@ -1,0 +1,17 @@
+{
+  "name": "compact6_v1",
+  "description": "Keep the three verified OA mid-route branches; merge OB1, OB2, and OC splits that are dominated by track coverage or endpoint truncation.",
+  "mapping": {
+    "OA_S00": "OA_S00",
+    "OA_S01": "OA_S01",
+    "OA_S02": "OA_S02",
+    "OB1_S00": "OB1_S00",
+    "OB1_S01": "OB1_S00",
+    "OB2_S00": "OB2_S00",
+    "OB2_S01": "OB2_S00",
+    "OC_S00": "OC_S00",
+    "OC_S01": "OC_S00",
+    "OC_S02": "OC_S00",
+    "OC_S03": "OC_S00"
+  }
+}
