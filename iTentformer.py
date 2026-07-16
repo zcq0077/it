@@ -18,6 +18,7 @@ from dataclasses import asdict, is_dataclass
 import importlib.util
 from pathlib import Path
 from types import ModuleType
+import hashlib
 import json
 import logging
 import sys
@@ -85,6 +86,8 @@ candidate_selection_calibration = None
 qwen_reranker = None
 qwen_reranker_runtime_active = False
 voyage_context_payload = None
+qwen_semantic_payload = None
+qwen_semantic_text_to_id = None
 
 
 def setup_logging(log_path, append=False):
@@ -216,6 +219,53 @@ def load_voyage_context_sidecar(path, tracks):
         if len(track) != len(ids):
             raise ValueError(f"Voyage context point count mismatch at track {index}.")
     return payload
+
+
+def voyage_text_pool_hash(text_pool):
+    digest = hashlib.sha256()
+    for text in text_pool:
+        digest.update(str(text).encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def load_qwen_semantic_sidecar(path, context_payload):
+    global qwen_semantic_text_to_id
+    if not path:
+        return None
+    if context_payload is None:
+        raise ValueError("Qwen semantic teacher requires --voyage_context_path.")
+    payload = pd.read_pickle(path)
+    if not isinstance(payload, dict) or int(payload.get("format_version", 0)) != 1:
+        raise ValueError("Unsupported Qwen semantic sidecar format.")
+    if not bool(payload.get("label_free", False)):
+        raise ValueError("Qwen semantic sidecar must be label-free to avoid fold leakage.")
+    embeddings = np.asarray(payload.get("embeddings"))
+    text_pool = list(context_payload["text_pool"])
+    if embeddings.ndim != 2 or embeddings.shape[0] != len(text_pool):
+        raise ValueError("Qwen semantic embeddings do not match voyage-context text_pool.")
+    expected_hash = voyage_text_pool_hash(text_pool)
+    if payload.get("text_pool_hash") != expected_hash:
+        raise ValueError("Qwen semantic sidecar was built from a different voyage context file.")
+    if int(payload.get("embedding_dim", 0)) != embeddings.shape[1]:
+        raise ValueError("Qwen semantic embedding dimension metadata is invalid.")
+    payload["embeddings"] = embeddings
+    qwen_semantic_text_to_id = {str(text): index for index, text in enumerate(text_pool)}
+    return payload
+
+
+def semantic_features_for_contexts(contexts):
+    if qwen_semantic_payload is None:
+        return None
+    if contexts is None:
+        raise ValueError("Semantic teacher is enabled but window voyage contexts are missing.")
+    ids = np.fromiter(
+        (qwen_semantic_text_to_id.get(str(text), 0) for text in contexts),
+        dtype=np.int64,
+        count=len(contexts),
+    )
+    rows = np.asarray(qwen_semantic_payload["embeddings"][ids], dtype=np.float32)
+    return torch.from_numpy(rows).to(device)
 
 
 def expand_track_contexts_to_windows(track_context_ids, window_slices, text_pool, stride):
@@ -1121,6 +1171,7 @@ def calibrate_candidate_selection(
         X_data,
         route_targets=None,
         subroute_targets=None,
+        voyage_contexts=None,
 ):
     global candidate_selection_calibration
     candidate_selection_calibration = None
@@ -1145,8 +1196,11 @@ def calibrate_candidate_selection(
             ]).to(device)
             route_target = None if route_targets is None else route_targets[batch_indices].to(device)
             subroute_target = None if subroute_targets is None else subroute_targets[batch_indices].to(device)
+            semantic_feature = semantic_features_for_contexts(
+                None if voyage_contexts is None else voyage_contexts[batch_indices]
+            )
             _, raw_output, route_logits, subroute_logits, _, subroute_feature, _, _ = unpack_model_output(
-                model(delta, src)
+                model(delta, src, semantic_feature=semantic_feature)
             )
             value_output = compose_value_output(raw_output, src)
             candidate_result = prepare_candidate_prediction(
@@ -1303,8 +1357,11 @@ def collect_qwen_reranker_examples(
             ]).to(device)
             route_target = route_targets[batch_indices].to(device)
             subroute_target = subroute_targets[batch_indices].to(device)
+            semantic_feature = semantic_features_for_contexts(
+                None if context_data is None else context_data[batch_indices_np]
+            )
             _, raw_output, route_logits, subroute_logits, _, subroute_feature, _, _ = unpack_model_output(
-                model(delta, src)
+                model(delta, src, semantic_feature=semantic_feature)
             )
             value_output = compose_value_output(raw_output, src)
             candidate_result = prepare_candidate_prediction(
@@ -2775,10 +2832,13 @@ def save_prediction_plots(
         delta = sample_data[:input_length, in_cols].unsqueeze(0).to(device)
         src = sample_data[:input_length, in_cols].unsqueeze(0).to(device)
         value_target = sample_data[input_length:input_length + target_length, src_cols].unsqueeze(0).to(device)
+        semantic_feature = semantic_features_for_contexts(
+            None if voyage_contexts is None else [voyage_contexts[sample_idx]]
+        )
 
         with torch.no_grad():
             _, raw_output, route_logits, subroute_logits, _, subroute_feature, _, _ = unpack_model_output(
-                model(delta, src)
+                model(delta, src, semantic_feature=semantic_feature)
             )
             output = compose_value_output(raw_output, src)
             selected_candidate_index = None
@@ -3042,6 +3102,9 @@ def evaluate(
             batch_decidability = None
             if subroute_decidability is not None:
                 batch_decidability = subroute_decidability[batch_indices].to(device)
+            semantic_feature = semantic_features_for_contexts(
+                None if voyage_contexts is None else voyage_contexts[batch_indices]
+            )
 
             (
                 intent,
@@ -3052,7 +3115,9 @@ def evaluate(
                 subroute_feature,
                 route_decidability_logits,
                 subroute_decidability_logits,
-            ) = unpack_model_output(model(delta, src))
+            ) = unpack_model_output(
+                model(delta, src, semantic_feature=semantic_feature)
+            )
             value_output = compose_value_output(raw_output, src)
             value_target = tgt_y
 
@@ -3434,6 +3499,9 @@ def train(ep, parallel_train=False):
                 if branch_decidability is None
                 else torch.minimum(batch_route_decidability, branch_decidability)
             )
+        semantic_feature = semantic_features_for_contexts(
+            None if X_train_contexts is None else X_train_contexts[batch_indices]
+        )
 
         (
             intent,
@@ -3448,6 +3516,7 @@ def train(ep, parallel_train=False):
             model(
                 delta,
                 src,
+                semantic_feature=semantic_feature,
                 route_target=route_target,
                 subroute_target=subroute_target,
                 teacher_forcing_ratio=teacher_forcing_ratio,
@@ -3587,6 +3656,11 @@ if __name__ == '__main__':
     )
     parser.add_argument("--data_path", default="dataset/example_bohai.pkl")
     parser.add_argument("--voyage_context_path", type=optional_path, default=None)
+    parser.add_argument("--use_qwen_semantic_teacher", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--qwen_semantic_path", type=optional_path, default=None)
+    parser.add_argument("--semantic_hidden_dim", type=int, default=128)
+    parser.add_argument("--semantic_fusion_weight", type=float, default=0.25)
+    parser.add_argument("--semantic_dropout", type=float, default=0.15)
     parser.add_argument("--group_folds_by_mmsi", action=BooleanOptionalAction, default=False)
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--folds", type=int, default=5)
@@ -3765,6 +3839,22 @@ if __name__ == '__main__':
         raise ValueError("--target_length must be positive.")
     if args.voyage_context_path and not Path(args.voyage_context_path).exists():
         raise FileNotFoundError(f"Voyage context sidecar not found: {args.voyage_context_path}")
+    if args.use_qwen_semantic_teacher:
+        if not args.voyage_context_path:
+            raise ValueError("--use_qwen_semantic_teacher requires --voyage_context_path.")
+        if not args.qwen_semantic_path:
+            raise ValueError("--use_qwen_semantic_teacher requires --qwen_semantic_path.")
+        if not Path(args.qwen_semantic_path).exists():
+            raise FileNotFoundError(
+                f"Qwen semantic sidecar not found: {args.qwen_semantic_path}. "
+                "Run utils/build_qwen_semantic_teacher.py first."
+            )
+    if args.semantic_hidden_dim < 1:
+        raise ValueError("--semantic_hidden_dim must be positive.")
+    if args.semantic_fusion_weight < 0:
+        raise ValueError("--semantic_fusion_weight must be non-negative.")
+    if not 0 <= args.semantic_dropout < 1:
+        raise ValueError("--semantic_dropout must be in [0, 1).")
     input_length = int(args.input_length)
     target_length = int(args.target_length)
     if args.geo_loss_scale <= 0:
@@ -4024,6 +4114,16 @@ if __name__ == '__main__':
         args.hierarchical_mask_strength,
     )
     logger.info(
+        "Qwen semantic teacher: enabled=%s, sidecar=%s, hidden=%d, "
+        "fusion_weight=%.3f, dropout=%.2f; embeddings are label-free and trained "
+        "with the main selector inside each fold.",
+        args.use_qwen_semantic_teacher,
+        args.qwen_semantic_path,
+        args.semantic_hidden_dim,
+        args.semantic_fusion_weight,
+        args.semantic_dropout,
+    )
+    logger.info(
         "Subroute switches: labels=%s, head=%s(w=%.3f), embedding=%s(dim=%d), "
         "contrastive=%s(w=%.3f,temp=%.3f), focal=%s(gamma=%.3f,smooth=%.3f), "
         "stratify_by_subroute=%s.",
@@ -4206,6 +4306,14 @@ if __name__ == '__main__':
     # 'MMSI','Length','Course','Lon_d','Lat_d','SOG','vx','vy', delta 'Course','Lon_d','Lat_d','SOG','vx','vy', 'UnixTime'
     data = pd.read_pickle(args.data_path)
     voyage_context_payload = load_voyage_context_sidecar(args.voyage_context_path, data)
+    qwen_semantic_payload = load_qwen_semantic_sidecar(
+        args.qwen_semantic_path if args.use_qwen_semantic_teacher else None,
+        voyage_context_payload,
+    )
+    semantic_feature_dim = (
+        0 if qwen_semantic_payload is None
+        else int(qwen_semantic_payload["embedding_dim"])
+    )
     all_voyage_context_ids = (
         None if voyage_context_payload is None else voyage_context_payload["context_ids"]
     )
@@ -4235,6 +4343,17 @@ if __name__ == '__main__':
             args.voyage_context_path,
             len(voyage_context_text_pool),
             100.0 * available / total_points,
+        )
+    if qwen_semantic_payload is not None:
+        logger.info(
+            "Qwen semantic teacher loaded from %s, model=%s, contexts=%d, "
+            "embedding_dim=%d, label_free=%s, fusion_weight=%.3f.",
+            args.qwen_semantic_path,
+            qwen_semantic_payload.get("model_path"),
+            qwen_semantic_payload.get("text_count"),
+            semantic_feature_dim,
+            qwen_semantic_payload.get("label_free"),
+            args.semantic_fusion_weight,
         )
     if route_labels is not None:
         logger.info(
@@ -4759,7 +4878,12 @@ if __name__ == '__main__':
                               use_candidate_selector=args.use_candidate_selector,
                               candidate_selector_hidden_dim=args.candidate_selector_hidden_dim,
                               candidate_probability_prior_weight=args.candidate_probability_prior_weight,
-                              candidate_base_prior_bias=args.candidate_base_prior_bias).to(device)
+                              candidate_base_prior_bias=args.candidate_base_prior_bias,
+                              use_semantic_teacher=args.use_qwen_semantic_teacher,
+                              semantic_feature_dim=semantic_feature_dim,
+                              semantic_hidden_dim=args.semantic_hidden_dim,
+                              semantic_fusion_weight=args.semantic_fusion_weight,
+                              semantic_dropout=args.semantic_dropout).to(device)
         awl = AutomaticWeightedLoss(2).cuda()
         if fold == 1:
             model_logger.info("number of parameters: %.6e", count_parameters(model))
@@ -4800,6 +4924,7 @@ if __name__ == '__main__':
                 X_valid,
                 route_targets=X_valid_route_ids,
                 subroute_targets=X_valid_subroute_ids,
+                voyage_contexts=X_valid_contexts,
             )
             if args.use_qwen_reranker:
                 if Path(qwen_adapter_name).exists():
@@ -4989,6 +5114,7 @@ if __name__ == '__main__':
             X_valid,
             route_targets=X_valid_route_ids,
             subroute_targets=X_valid_subroute_ids,
+            voyage_contexts=X_valid_contexts,
         )
         if args.use_qwen_reranker:
             logger.info("Starting second-stage Qwen candidate reranker training for fold %d/%d.", fold, args.folds)

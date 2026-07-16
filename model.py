@@ -289,7 +289,10 @@ class iTentformer(nn.Module):
                  routing_top_k=2, use_candidate_selector=False,
                  candidate_selector_hidden_dim=64,
                  candidate_probability_prior_weight=0.3,
-                 candidate_base_prior_bias=0.5):
+                 candidate_base_prior_bias=0.5,
+                 use_semantic_teacher=False, semantic_feature_dim=0,
+                 semantic_hidden_dim=128, semantic_fusion_weight=0.25,
+                 semantic_dropout=0.15):
         super().__init__()
         self.target_length = int(target_length)
         self.TCN = TCN(input_size_tcn, local_intent_size, num_channels, kernel_size, dropout=dropout)
@@ -349,6 +352,11 @@ class iTentformer(nn.Module):
         self.candidate_probability_prior_weight = candidate_probability_prior_weight
         self.candidate_base_prior_bias = candidate_base_prior_bias
         feature_dim = num_channels[-1]
+        self.use_semantic_teacher = bool(
+            use_semantic_teacher and semantic_feature_dim > 0
+        )
+        self.semantic_feature_dim = int(semantic_feature_dim)
+        self.semantic_fusion_weight = float(semantic_fusion_weight)
 
         if route_prototypes is not None:
             self.register_buffer("route_prototypes", route_prototypes.float())
@@ -370,6 +378,20 @@ class iTentformer(nn.Module):
         elif intent_summary_mode != "mean":
             raise ValueError(f"Unsupported intent summary mode: {intent_summary_mode}")
 
+        if self.use_semantic_teacher:
+            self.semantic_encoder = nn.Sequential(
+                nn.LayerNorm(self.semantic_feature_dim),
+                nn.Linear(self.semantic_feature_dim, semantic_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(semantic_dropout),
+                nn.Linear(semantic_hidden_dim, feature_dim),
+                nn.LayerNorm(feature_dim),
+            )
+            self.semantic_fusion_gate = nn.Sequential(
+                nn.Linear(feature_dim * 2, feature_dim),
+                nn.Sigmoid(),
+            )
+
         if self.use_route_intent_head:
             self.route_head = nn.Sequential(
                 nn.LayerNorm(feature_dim),
@@ -389,6 +411,8 @@ class iTentformer(nn.Module):
             if self.use_route_embedding:
                 self.route_embedding = nn.Embedding(route_classes, route_embedding_dim)
                 self.route_to_intent = nn.Linear(route_embedding_dim, feature_dim)
+            if self.use_semantic_teacher:
+                self.semantic_route_head = nn.Linear(feature_dim, route_classes, bias=False)
 
         if self.use_subroute_intent_head:
             self.subroute_head = nn.Sequential(
@@ -409,6 +433,8 @@ class iTentformer(nn.Module):
             if self.use_subroute_embedding:
                 self.subroute_embedding = nn.Embedding(subroute_classes, subroute_embedding_dim)
                 self.subroute_to_intent = nn.Linear(subroute_embedding_dim, feature_dim)
+            if self.use_semantic_teacher:
+                self.semantic_subroute_head = nn.Linear(feature_dim, subroute_classes, bias=False)
 
         if self.use_candidate_selector:
             selector_input_dim = (
@@ -438,6 +464,22 @@ class iTentformer(nn.Module):
             dim=-1,
         )
         return self.intent_summary(history_summary)
+
+    def _fuse_semantic_feature(self, intent_feature, semantic_feature):
+        if not self.use_semantic_teacher or semantic_feature is None:
+            return intent_feature, None
+        if semantic_feature.ndim != 2 or semantic_feature.size(-1) != self.semantic_feature_dim:
+            raise ValueError(
+                "semantic_feature must have shape [batch, semantic_feature_dim]."
+            )
+        available = semantic_feature.float().norm(dim=-1, keepdim=True).gt(1e-6)
+        semantic_latent = self.semantic_encoder(semantic_feature.float())
+        semantic_latent = semantic_latent * available.to(semantic_latent.dtype)
+        gate = self.semantic_fusion_gate(
+            torch.cat((intent_feature, semantic_latent), dim=-1)
+        )
+        fused = intent_feature + self.semantic_fusion_weight * gate * semantic_latent
+        return fused, semantic_latent
 
     def _routing_prob(
             self,
@@ -691,6 +733,7 @@ class iTentformer(nn.Module):
             self,
             delta,
             src,
+            semantic_feature=None,
             route_target=None,
             subroute_target=None,
             teacher_forcing_ratio=0.0,
@@ -705,10 +748,18 @@ class iTentformer(nn.Module):
         subroute_feature = None
         subroute_decidability_logits = None
         intent_feature = self._intent_feature(intent)
+        intent_feature, semantic_latent = self._fuse_semantic_feature(
+            intent_feature,
+            semantic_feature,
+        )
 
         if self.use_route_intent_head:
             route_feature = intent_feature
             route_logits = self.route_head(route_feature)
+            if semantic_latent is not None:
+                route_logits = route_logits + self.semantic_fusion_weight * self.semantic_route_head(
+                    semantic_latent
+                )
             if self.use_learned_decidability:
                 route_decidability_logits = self.route_decidability_head(route_feature).squeeze(-1)
             route_prototype_prior = self._prototype_prior_logits(src, self.route_prototypes)
@@ -732,6 +783,10 @@ class iTentformer(nn.Module):
         if self.use_subroute_intent_head:
             subroute_feature = intent_feature
             subroute_logits = self.subroute_head(subroute_feature)
+            if semantic_latent is not None:
+                subroute_logits = subroute_logits + self.semantic_fusion_weight * self.semantic_subroute_head(
+                    semantic_latent
+                )
             if self.use_learned_decidability:
                 subroute_decidability_logits = self.subroute_decidability_head(subroute_feature).squeeze(-1)
             prototype_prior = self._prototype_prior_logits(src, self.subroute_prototypes)

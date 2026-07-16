@@ -33,6 +33,16 @@ class Config:
     # 侧车只保存每个历史时刻之前最后已知的船型、吃水、Destination等语义信息。
     voyage_context_path = "dataset/dma_raw_2023_06_07_08/dma_voyage_context_2023_06_07_08.pkl"
 
+    # 千问语义教师：该侧车只包含预测时刻之前航次文本的冻结向量，
+    # 不读取航路标签和真实未来，因此可以安全地跨折复用。
+    # 先运行 utils/build_qwen_semantic_teacher.py 生成该文件。
+    use_qwen_semantic_teacher = True
+    qwen_semantic_path = "dataset/dma_raw_2023_06_07_08/dma_qwen_semantic_teacher_v1.pkl"
+    semantic_hidden_dim = 128
+    # 语义仅作为温和软先验，避免错误Destination压过历史轨迹。
+    semantic_fusion_weight = 0.25
+    semantic_dropout = 0.20
+
     # 加入船舶静态/航次信息后必须按MMSI分组，避免同一艘船同时出现在训练和测试中。
     group_folds_by_mmsi = True
 
@@ -146,7 +156,8 @@ class Config:
     # 基础预测 + Top-2 大类各自 Top-2 子航路，共 5 条候选，最终仍只输出一条。
     # 千问不直接生成经纬度，也不会把 4GB 权重复制进 iTentformer checkpoint；
     # 这里只训练并单独保存数值适配器和打分头，便于关闭后做消融实验。
-    use_qwen_reranker = True
+    # 旧的训练后候选重排器在验证集未获得可靠增益，默认关闭并保留作消融实验。
+    use_qwen_reranker = False
     qwen_model_path = r"D:\Jason1982\wsl\Models\Qwen3-1.7B"
 
     # None：每折自动保存为 model_dir/model_prefix_Kx_qwen_reranker.pt。
@@ -279,7 +290,7 @@ class Config:
     # ======================================================================
     # 保存模型文件时用的前缀。最终通常类似：
     # save_models/dma_2023_06_07_08_ti_4class_K1.pt
-    model_prefix = "dma_2023_06_07_08_ti_4class_candidate_v11_qwen_reverse_compact6_hist3h_pred3h"
+    model_prefix = "dma_2023_06_07_08_ti_4class_candidate_v12_qwen_semantic_compact6_hist3h_pred3h"
 
     # 模型 checkpoint 保存目录。
     model_dir = "save_models"
