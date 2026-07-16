@@ -6,6 +6,8 @@ from sklearn.model_selection import (
     StratifiedKFold,
     StratifiedGroupKFold,
     GroupShuffleSplit,
+    StratifiedShuffleSplit,
+    ShuffleSplit,
 )
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
@@ -322,6 +324,82 @@ def grouped_validation_split(labels, groups, valid_count, seed):
     splitter = GroupShuffleSplit(n_splits=1, test_size=ratio, random_state=seed)
     train_indices, valid_indices = next(splitter.split(indices, groups=groups))
     return np.asarray(train_indices), np.asarray(valid_indices)
+
+
+def fixed_holdout_split(labels, groups, test_ratio, seed, group_by_mmsi):
+    indices = np.arange(len(groups))
+    if group_by_mmsi:
+        splitter = GroupShuffleSplit(
+            n_splits=128,
+            test_size=test_ratio,
+            random_state=seed,
+        )
+        overall_ratio = None
+        classes = None
+        if labels is not None:
+            labels = np.asarray(labels)
+            classes, overall_counts = np.unique(labels, return_counts=True)
+            overall_ratio = overall_counts / max(float(overall_counts.sum()), 1.0)
+        best_split = None
+        best_score = float("inf")
+        for train_indices, test_indices in splitter.split(indices, groups=groups):
+            size_error = abs(len(test_indices) / len(indices) - test_ratio)
+            class_error = 0.0
+            if labels is not None:
+                test_counts = np.asarray([
+                    np.sum(labels[test_indices] == class_name) for class_name in classes
+                ], dtype=np.float64)
+                if np.any(test_counts == 0):
+                    class_error += 1.0
+                test_class_ratio = test_counts / max(float(test_counts.sum()), 1.0)
+                class_error += float(np.mean(np.abs(test_class_ratio - overall_ratio)))
+            score = 20.0 * size_error + class_error
+            if score < best_score:
+                best_score = score
+                best_split = (train_indices, test_indices)
+        return tuple(np.asarray(item) for item in best_split)
+    if labels is not None:
+        splitter = StratifiedShuffleSplit(
+            n_splits=1, test_size=test_ratio, random_state=seed
+        )
+        train_indices, test_indices = next(splitter.split(indices, labels))
+    else:
+        splitter = ShuffleSplit(n_splits=1, test_size=test_ratio, random_state=seed)
+        train_indices, test_indices = next(splitter.split(indices))
+    return np.asarray(train_indices), np.asarray(test_indices)
+
+
+def validate_fixed_split_manifest(payload, track_count, mmsi_hash):
+    if not isinstance(payload, dict) or int(payload.get("format_version", 0)) != 1:
+        raise ValueError("Unsupported fixed split manifest format.")
+    if int(payload.get("track_count", -1)) != int(track_count):
+        raise ValueError("Fixed split manifest does not match the trajectory count.")
+    if payload.get("mmsi_hash") != mmsi_hash:
+        raise ValueError("Fixed split manifest does not match the dataset MMSI order.")
+    split_indices = {
+        name: np.asarray(payload.get(f"{name}_indices", []), dtype=np.int64)
+        for name in ("train", "valid", "test")
+    }
+    combined = np.concatenate(tuple(split_indices.values()))
+    if (
+            len(combined) != track_count
+            or len(np.unique(combined)) != track_count
+            or np.any(combined < 0)
+            or np.any(combined >= track_count)
+    ):
+        raise ValueError("Fixed split manifest must contain every track exactly once.")
+    if bool(payload.get("group_by_mmsi", False)):
+        mmsi_sets = {
+            name: set(payload.get(f"{name}_mmsi", []))
+            for name in ("train", "valid", "test")
+        }
+        if (
+                mmsi_sets["train"] & mmsi_sets["valid"]
+                or mmsi_sets["train"] & mmsi_sets["test"]
+                or mmsi_sets["valid"] & mmsi_sets["test"]
+        ):
+            raise ValueError("Fixed split manifest contains MMSI leakage between splits.")
+    return split_indices
 
 
 def optional_float(value):
@@ -3621,7 +3699,7 @@ def train(ep, parallel_train=False):
     return epoch_total_loss / max(epoch_sample, 1)
 
 
-def data_prepare(data, train_scale, valid_scale, lay_data=True):
+def data_prepare(data, train_scale, valid_scale, lay_data=True, fit_indices=None):
     """
     先将时间窗拼接为3维->标准化->还原回原始形式->打乱每一个窗口->以窗口划分训练集和验证集->重新拼接
     """
@@ -3629,7 +3707,15 @@ def data_prepare(data, train_scale, valid_scale, lay_data=True):
     length = [len(l) for i, l in enumerate(data)]
     scaler_data = data_2lay[:, 2:-1]
     scaler = StandardScaler()
-    scaler_data = scaler.fit_transform(scaler_data)
+    if fit_indices is None:
+        scaler.fit(scaler_data)
+    else:
+        fit_indices = np.asarray(fit_indices, dtype=np.int64)
+        if fit_indices.size == 0:
+            raise ValueError("Normalization fit_indices cannot be empty.")
+        fit_data = np.concatenate([data[int(index)] for index in fit_indices], axis=0)
+        scaler.fit(fit_data[:, 2:-1])
+    scaler_data = scaler.transform(scaler_data)
     mean_values = scaler.mean_
     std_values = scaler.scale_
     mean_values.astype(np.float32)
@@ -3662,6 +3748,11 @@ if __name__ == '__main__':
     parser.add_argument("--semantic_fusion_weight", type=float, default=0.25)
     parser.add_argument("--semantic_dropout", type=float, default=0.15)
     parser.add_argument("--group_folds_by_mmsi", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--split_mode", choices=["kfold", "fixed"], default="kfold")
+    parser.add_argument("--test_ratio", type=float, default=0.20)
+    parser.add_argument("--split_seed", type=int, default=42)
+    parser.add_argument("--split_manifest_path", type=optional_path, default=None)
+    parser.add_argument("--split_only", action=BooleanOptionalAction, default=False)
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--run_folds", type=int, default=1)
@@ -3837,6 +3928,10 @@ if __name__ == '__main__':
         raise ValueError("--input_length must be at least 2.")
     if args.target_length < 1:
         raise ValueError("--target_length must be positive.")
+    if not 0 < args.test_ratio < 1:
+        raise ValueError("--test_ratio must be between 0 and 1.")
+    if args.split_mode == "fixed":
+        args.folds = 1
     if args.voyage_context_path and not Path(args.voyage_context_path).exists():
         raise FileNotFoundError(f"Voyage context sidecar not found: {args.voyage_context_path}")
     if args.use_qwen_semantic_teacher:
@@ -4088,6 +4183,19 @@ if __name__ == '__main__':
         input_length,
         target_length,
         input_length + target_length,
+    )
+    logger.info(
+        "Dataset split: mode=%s, test_ratio=%.3f, validation=%s, seed=%d, "
+        "MMSI_grouped=%s, manifest=%s.",
+        args.split_mode,
+        args.test_ratio,
+        (
+            f"ratio_within_non_test={args.valid_ratio:.3f}"
+            if args.valid_ratio is not None else f"count={args.valid_count}"
+        ),
+        args.split_seed,
+        args.group_folds_by_mmsi,
+        args.split_manifest_path,
     )
     logger.info(
         "Optimization switches: target_mode=%s, geo=%s(w=%.3f,scale=%.3f), "
@@ -4394,7 +4502,82 @@ if __name__ == '__main__':
         split_labels = route_labels
         split_label_name = "route"
 
-    if args.group_folds_by_mmsi and split_labels is not None:
+    fixed_manifest_indices = None
+    split_manifest_path = (
+        None if args.split_mode != "fixed"
+        else Path(args.split_manifest_path) if args.split_manifest_path
+        else run_dir / "fixed_split.json"
+    )
+    mmsi_hash = hashlib.sha256(track_mmsi.tobytes()).hexdigest()
+    if args.split_mode == "fixed" and split_manifest_path.exists():
+        fixed_manifest_payload = json.loads(split_manifest_path.read_text(encoding="utf-8"))
+        fixed_manifest_indices = validate_fixed_split_manifest(
+            fixed_manifest_payload,
+            len(data),
+            mmsi_hash,
+        )
+        fixed_outer_indices = np.concatenate((
+            fixed_manifest_indices["train"],
+            fixed_manifest_indices["valid"],
+        ))
+        fold_iter = iter([(fixed_outer_indices, fixed_manifest_indices["test"])])
+        split_label_name = f"fixed {split_label_name}, saved manifest"
+        logger.info("Loaded fixed train/valid/test split from %s.", split_manifest_path)
+    elif args.split_mode == "fixed":
+        fixed_outer_indices, fixed_test_indices = fixed_holdout_split(
+            split_labels,
+            track_mmsi,
+            args.test_ratio,
+            args.split_seed,
+            args.group_folds_by_mmsi,
+        )
+        split_label_name = f"fixed {split_label_name}"
+        fixed_valid_count, _ = resolve_valid_count(args, len(fixed_outer_indices))
+        fixed_valid_ratio = fixed_valid_count / len(fixed_outer_indices)
+        fixed_outer_labels = (
+            None if split_labels is None
+            else np.asarray(split_labels)[fixed_outer_indices]
+        )
+        relative_train_indices, relative_valid_indices = fixed_holdout_split(
+            fixed_outer_labels,
+            track_mmsi[fixed_outer_indices],
+            fixed_valid_ratio,
+            args.split_seed + 1,
+            args.group_folds_by_mmsi,
+        )
+        global_train_indices = fixed_outer_indices[relative_train_indices]
+        global_valid_indices = fixed_outer_indices[relative_valid_indices]
+        fixed_manifest_payload = {
+            "format_version": 1,
+            "data_path": str(args.data_path),
+            "track_count": int(len(data)),
+            "mmsi_hash": mmsi_hash,
+            "split_seed": int(args.split_seed),
+            "test_ratio": float(args.test_ratio),
+            "valid_ratio_within_non_test": args.valid_ratio,
+            "group_by_mmsi": bool(args.group_folds_by_mmsi),
+            "stratify_label": split_label_name,
+            "train_indices": global_train_indices.astype(int).tolist(),
+            "valid_indices": global_valid_indices.astype(int).tolist(),
+            "test_indices": fixed_test_indices.astype(int).tolist(),
+            "train_mmsi": sorted(set(track_mmsi[global_train_indices].astype(int).tolist())),
+            "valid_mmsi": sorted(set(track_mmsi[global_valid_indices].astype(int).tolist())),
+            "test_mmsi": sorted(set(track_mmsi[fixed_test_indices].astype(int).tolist())),
+        }
+        split_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        split_manifest_path.write_text(
+            json.dumps(fixed_manifest_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        fixed_manifest_indices = {
+            "train": global_train_indices,
+            "valid": global_valid_indices,
+            "test": fixed_test_indices,
+        }
+        fixed_outer_indices = np.concatenate((global_train_indices, global_valid_indices))
+        fold_iter = iter([(fixed_outer_indices, fixed_test_indices)])
+        logger.info("Saved fixed train/valid/test split to %s.", split_manifest_path)
+    elif args.group_folds_by_mmsi and split_labels is not None:
         k_fold = StratifiedGroupKFold(n_splits=args.folds, shuffle=True, random_state=42)
         fold_iter = k_fold.split(np.arange(len(data)), split_labels, groups=track_mmsi)
         split_label_name = f"{split_label_name}+MMSI-grouped"
@@ -4408,7 +4591,11 @@ if __name__ == '__main__':
     else:
         k_fold = KFold(n_splits=args.folds, shuffle=True, random_state=42)
         fold_iter = k_fold.split(data)
-    logger.info("KFold split mode: %s.", split_label_name)
+    logger.info("Dataset split mode: %s.", split_label_name)
+    if args.split_mode == "fixed":
+        logger.info(
+            "Fixed holdout uses one internal run (shown as 1/1 below); this is not K-fold cross-validation."
+        )
     fold = 1
     for i, (train_indices, test_indices) in enumerate(fold_iter):
         if fold > args.run_folds:
@@ -4459,7 +4646,31 @@ if __name__ == '__main__':
                 dict(Counter(test_subroute_names)),
             )
 
-        train_data, mean_values, std_values = data_prepare([data[i] for i in fold_train_indices], 0.6, 0.2)
+        fixed_train_relative = None
+        fixed_valid_relative = None
+        if fixed_manifest_indices is not None:
+            outer_position = {
+                int(global_index): position
+                for position, global_index in enumerate(fold_train_indices)
+            }
+            fixed_train_relative = np.asarray([
+                outer_position[int(index)] for index in fixed_manifest_indices["train"]
+            ], dtype=np.int64)
+            fixed_valid_relative = np.asarray([
+                outer_position[int(index)] for index in fixed_manifest_indices["valid"]
+            ], dtype=np.int64)
+
+        train_data, mean_values, std_values = data_prepare(
+            [data[i] for i in fold_train_indices],
+            0.6,
+            0.2,
+            fit_indices=fixed_train_relative,
+        )
+        if fixed_train_relative is not None:
+            logger.info(
+                "Normalization statistics fitted on %d track(s) from the fixed training split only.",
+                len(fixed_train_relative),
+            )
         transform_matrix = np.diag(std_values[:4])
         transform_tensor = torch.from_numpy(transform_matrix).float().to(device)
         mean_tensor = torch.from_numpy(mean_values[:4]).float().to(device)
@@ -4480,7 +4691,12 @@ if __name__ == '__main__':
             start_idx = end_idx
 
         valid_count, valid_split_desc = resolve_valid_count(args, len(train_data))
-        if args.group_folds_by_mmsi:
+        if fixed_manifest_indices is not None:
+            train_indices = fixed_train_relative
+            valid_indices = fixed_valid_relative
+            valid_count = len(valid_indices)
+            valid_split_desc = f"saved manifest={split_manifest_path}"
+        elif args.group_folds_by_mmsi:
             validation_labels = None
             if fold_train_subroute_ids is not None and args.stratify_by_subroute:
                 validation_labels = fold_train_subroute_ids
@@ -4508,10 +4724,13 @@ if __name__ == '__main__':
             fold,
             args.folds,
             len(train_data),
-            valid_count,
+            len(valid_indices),
             valid_split_desc,
             len(train_indices),
         )
+        if args.split_only:
+            logger.info("Split-only mode completed; model training was skipped.")
+            break
         train_track_labels = None if fold_train_labels is None else fold_train_labels[train_indices]
         valid_track_labels = None if fold_train_labels is None else fold_train_labels[valid_indices]
         test_track_labels = fold_test_labels
@@ -4899,11 +5118,12 @@ if __name__ == '__main__':
         best_monitor_score = 1e8
         lr_lower_bound = 1e-10
         monitor_score_list = []
-        model_name = str(Path(args.model_dir) / f"{args.model_prefix}_K{fold}.pt")
+        model_suffix = "fixed" if args.split_mode == "fixed" else f"K{fold}"
+        model_name = str(Path(args.model_dir) / f"{args.model_prefix}_{model_suffix}.pt")
         qwen_adapter_name = str(
             Path(args.qwen_adapter_path)
             if args.qwen_adapter_path
-            else Path(args.model_dir) / f"{args.model_prefix}_K{fold}_qwen_reranker.pt"
+            else Path(args.model_dir) / f"{args.model_prefix}_{model_suffix}_qwen_reranker.pt"
         )
         best_epoch = 0
         early_stopping = EarlyStopping(patience=args.patience, verbose=False)

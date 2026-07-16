@@ -46,6 +46,14 @@ class Config:
     # 加入船舶静态/航次信息后必须按MMSI分组，避免同一艘船同时出现在训练和测试中。
     group_folds_by_mmsi = True
 
+    # 固定传统划分：70%训练、10%验证、20%测试，只训练一次。
+    # 第一次运行会生成划分清单，之后始终复用，保证不同模型公平比较。
+    # 改回 "kfold" 可恢复原来的5折交叉验证。
+    split_mode = "fixed"
+    test_ratio = 0.20
+    split_seed = 42
+    split_manifest_path = "dataset/dma_raw_2023_06_07_08/dma_fixed_split_70_10_20_seed42.json"
+
     # 每条轨迹对应的航路类别标签。当前包含 OA / OB1 / OB2 / OC 四类。
     # 这个文件不是模型输入特征，主要用于：
     # 1. K 折划分时尽量让每折都有各类航路；
@@ -290,7 +298,7 @@ class Config:
     # ======================================================================
     # 保存模型文件时用的前缀。最终通常类似：
     # save_models/dma_2023_06_07_08_ti_4class_K1.pt
-    model_prefix = "dma_2023_06_07_08_ti_4class_candidate_v12_qwen_semantic_compact6_hist3h_pred3h"
+    model_prefix = "dma_2023_06_07_08_ti_4class_candidate_v13_fixedsplit_qwen_semantic_compact6_hist3h_pred3h"
 
     # 模型 checkpoint 保存目录。
     model_dir = "save_models"
@@ -323,11 +331,10 @@ class Config:
     checkpoint_path = None
 
     # ======================================================================
-    # 4. K 折、训练轮数和数据窗口
+    # 4. 数据划分、训练轮数和数据窗口
     # ======================================================================
-    # 总共划分多少折。论文常见是 5 折。
-    # 注意：folds 必须 >= 2；如果只想跑一折，不要把这里改成 1，
-    # 而是保持 folds = 5，然后把下面的 run_folds = 1。
+    # split_mode="fixed" 时下面两项不会控制数据划分，程序只训练一次。
+    # split_mode="kfold" 时，folds是总折数，run_folds是实际运行折数。
     folds = 5
 
     # 实际跑几折。
@@ -350,10 +357,9 @@ class Config:
     early_stop_metric = "ade_fde"
     early_stop_fde_weight = 0.2
 
-    # 验证集比例。推荐用比例，不用再根据数据集大小手动改验证集数量。
-    # 0.1 表示：每一折先分出测试集后，再从剩余训练候选轨迹里拿 10% 做验证集。
-    # 以当前 4854 条轨迹、5 折为例，每折训练候选约 3883 条，验证集约 388 条。
-    valid_ratio = 0.1
+    # 验证集占非测试数据的比例。固定测试集占20%后，剩余80%中的12.5%
+    # 作为验证集，即总数据约10%。按MMSI分组后实际条数可能有轻微偏差。
+    valid_ratio = 0.125
 
     # 固定验证集条数。只有当 valid_ratio = None 时才会使用这个参数。
     # 小样本复现实验想完全固定验证集数量时，可以设 valid_ratio = None，然后改这里。
