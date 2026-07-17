@@ -286,19 +286,43 @@ class Config:
     subroute_class_weight_max_ratio = 5.0
 
     # 温和子航路均衡采样。每轮训练仍保持同样窗口数，只把其中一部分替换成按小类加权抽样。
-    # mix_ratio=0.3 表示约 70% 仍按原始分布训练，30% 用均衡抽样照顾小类。
+    # 下面保留旧版混合比例，只有关闭“解耦双流训练”时才会使用。
     use_balanced_subroute_sampling = True
     balanced_sampling_alpha = 0.4
     balanced_sampling_max_ratio = 5.0
-    balanced_sampling_mix_ratio = 0.4
-    # Current default: 60% natural windows + 40% subroute-balanced replacement.
+    balanced_sampling_mix_ratio = 0.2
+
+    # 解耦双流训练：主轨迹流始终使用完整自然分布，不再被重复的小类窗口替换；
+    # 额外的小类均衡流只训练主/子航路分类、可判别性、对比表示和未来意图原型。
+    # 这样能照顾 OA_S02/OB2 等小类，同时尽量保护总体 ADE/FDE 和大类轨迹质量。
+    use_decoupled_balanced_intent_training = True
+
+    # 辅助流额外处理的窗口数占自然训练流的比例。0.20 约增加 20% 的编码器计算，
+    # 不增加主轨迹解码和候选生成计算；比例过大容易反复学习少量小类噪声。
+    balanced_intent_ratio = 0.20
+    balanced_intent_loss_weight = 0.35
+
+    # 前3轮逐渐把辅助流从 1/3 强度升到完整强度，先让主模型学会基本运动规律。
+    balanced_intent_warmup_epochs = 3
+
+    # Future-enhanced 子航路意图原型。训练时用真实未来相对位移提炼“这条支路以后怎么走”，
+    # 并把可判别历史拉向对应原型；验证和推理完全不读取未来，避免信息泄漏。
+    # 对不可判别窗口，历史-未来对齐权重会按 decidability 自动接近0，不强迫凭空硬选。
+    use_future_enhanced_intent = True
+    future_intent_dim = 64
+    future_intent_temperature = 0.20
+
+    # 原型匹配只作为子航路 logits 的温和残差，避免它压过原始历史分类器。
+    future_intent_logit_weight = 0.15
+    future_intent_loss_weight = 0.08
+    future_intent_alignment_weight = 0.50
 
     # ======================================================================
     # 2. 实验输出位置
     # ======================================================================
     # 保存模型文件时用的前缀。最终通常类似：
     # save_models/dma_2023_06_07_08_ti_4class_K1.pt
-    model_prefix = "dma_2023_06_07_08_ti_4class_candidate_v13_fixedsplit_qwen_semantic_compact6_hist3h_pred3h"
+    model_prefix = "dma_2023_06_07_08_ti_4class_candidate_v14_tailintent_fixedsplit_qwen_semantic_compact6_hist3h_pred3h"
 
     # 模型 checkpoint 保存目录。
     model_dir = "save_models"

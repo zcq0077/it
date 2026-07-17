@@ -2115,11 +2115,7 @@ def focal_cross_entropy_loss(logits, target, class_weights=None, gamma=1.5, labe
     return focal_weight * ce_loss
 
 
-def compute_objective(
-        intent,
-        intent_y,
-        value_output,
-        value_target,
+def compute_intent_objective(
         route_logits=None,
         route_target=None,
         route_decidability=None,
@@ -2129,38 +2125,22 @@ def compute_objective(
         subroute_feature=None,
         subroute_decidability=None,
         subroute_decidability_logits=None,
+        use_class_weights=True,
 ):
-    mse_loss = criterion1(value_output, value_target)
-    intent = intent.reshape(-1, intent.size(-1))
-    intent_y = intent_y.reshape(-1, intent_y.size(-1))
-    loss_int = criterion1(intent, intent_y)
-    loss = awl(loss_int, mse_loss)
-
-    real_output = None
-    real_target = None
-    if args.use_geo_loss or args.use_circular_cog:
-        real_output = standardized_to_real(value_output)
-        real_target = standardized_to_real(value_target)
-
-    if args.use_geo_loss:
-        dist = stable_haversine(real_output[:, :, 1:3].float(), real_target[:, :, 1:3].float())
-        geo_loss = torch.mean(dist) / args.geo_loss_scale
-        loss = loss + args.geo_weight * geo_loss
-
-    if args.use_fde_loss:
-        fde_loss = criterion1(value_output[:, -1, 1:3], value_target[:, -1, 1:3])
-        loss = loss + args.fde_weight * fde_loss
-
-    if args.use_smooth_loss:
-        pred_delta = value_output[:, 1:, 1:3] - value_output[:, :-1, 1:3]
-        target_delta = value_target[:, 1:, 1:3] - value_target[:, :-1, 1:3]
-        smooth_loss = criterion1(pred_delta, target_delta)
-        loss = loss + args.smooth_weight * smooth_loss
-
-    if args.use_circular_cog:
-        cog_diff = circular_angle_diff(real_output[:, :, 0], real_target[:, :, 0])
-        cog_loss = torch.mean((cog_diff / args.cog_loss_scale) ** 2)
-        loss = loss + args.cog_weight * cog_loss
+    reference = next(
+        (
+            item for item in (
+                route_logits,
+                subroute_logits,
+                subroute_feature,
+                route_decidability_logits,
+                subroute_decidability_logits,
+            )
+            if item is not None
+        ),
+        None,
+    )
+    loss = torch.zeros((), device=device if reference is None else reference.device)
 
     if args.use_route_intent_head and route_logits is not None and route_target is not None:
         route_loss_values = F.cross_entropy(
@@ -2214,7 +2194,11 @@ def compute_objective(
             loss = loss + args.route_decidability_loss_weight * route_decidability_loss
 
     if args.use_subroute_intent_head and subroute_logits is not None and subroute_target is not None:
-        class_weights = subroute_class_weights if args.use_subroute_class_weight else None
+        class_weights = (
+            subroute_class_weights
+            if args.use_subroute_class_weight and use_class_weights
+            else None
+        )
         hard_sample_weights = None
         if subroute_decidability is not None:
             hard_sample_weights = (
@@ -2296,6 +2280,68 @@ def compute_objective(
                 subroute_decidability_target.reshape(-1),
             )
             loss = loss + args.subroute_decidability_loss_weight * subroute_decidability_loss
+
+    return loss
+
+
+def compute_objective(
+        intent,
+        intent_y,
+        value_output,
+        value_target,
+        route_logits=None,
+        route_target=None,
+        route_decidability=None,
+        route_decidability_logits=None,
+        subroute_logits=None,
+        subroute_target=None,
+        subroute_feature=None,
+        subroute_decidability=None,
+        subroute_decidability_logits=None,
+):
+    mse_loss = criterion1(value_output, value_target)
+    intent = intent.reshape(-1, intent.size(-1))
+    intent_y = intent_y.reshape(-1, intent_y.size(-1))
+    loss_int = criterion1(intent, intent_y)
+    loss = awl(loss_int, mse_loss)
+
+    real_output = None
+    real_target = None
+    if args.use_geo_loss or args.use_circular_cog:
+        real_output = standardized_to_real(value_output)
+        real_target = standardized_to_real(value_target)
+
+    if args.use_geo_loss:
+        dist = stable_haversine(real_output[:, :, 1:3].float(), real_target[:, :, 1:3].float())
+        geo_loss = torch.mean(dist) / args.geo_loss_scale
+        loss = loss + args.geo_weight * geo_loss
+
+    if args.use_fde_loss:
+        fde_loss = criterion1(value_output[:, -1, 1:3], value_target[:, -1, 1:3])
+        loss = loss + args.fde_weight * fde_loss
+
+    if args.use_smooth_loss:
+        pred_delta = value_output[:, 1:, 1:3] - value_output[:, :-1, 1:3]
+        target_delta = value_target[:, 1:, 1:3] - value_target[:, :-1, 1:3]
+        smooth_loss = criterion1(pred_delta, target_delta)
+        loss = loss + args.smooth_weight * smooth_loss
+
+    if args.use_circular_cog:
+        cog_diff = circular_angle_diff(real_output[:, :, 0], real_target[:, :, 0])
+        cog_loss = torch.mean((cog_diff / args.cog_loss_scale) ** 2)
+        loss = loss + args.cog_weight * cog_loss
+
+    loss = loss + compute_intent_objective(
+        route_logits=route_logits,
+        route_target=route_target,
+        route_decidability=route_decidability,
+        route_decidability_logits=route_decidability_logits,
+        subroute_logits=subroute_logits,
+        subroute_target=subroute_target,
+        subroute_feature=subroute_feature,
+        subroute_decidability=subroute_decidability,
+        subroute_decidability_logits=subroute_decidability_logits,
+    )
 
     return loss
 
@@ -3527,7 +3573,28 @@ def train(ep, parallel_train=False):
     epoch_total_loss = 0
     epoch_sample = 0
     train_idx_list = np.random.permutation(len(X_train)).astype("int32")
-    if (
+    use_decoupled_intent_stream = bool(
+        args.use_decoupled_balanced_intent_training
+        and args.use_balanced_subroute_sampling
+        and train_sampling_probabilities is not None
+        and args.balanced_intent_ratio > 0
+    )
+    balanced_intent_indices = np.empty(0, dtype="int32")
+    if use_decoupled_intent_stream:
+        warmup_progress = min(
+            float(ep) / max(float(args.balanced_intent_warmup_epochs), 1.0),
+            1.0,
+        )
+        balanced_intent_count = int(round(
+            len(X_train) * args.balanced_intent_ratio * warmup_progress
+        ))
+        balanced_intent_indices = np.random.choice(
+            len(X_train),
+            size=balanced_intent_count,
+            replace=True,
+            p=train_sampling_probabilities,
+        ).astype("int32")
+    elif (
             args.use_balanced_subroute_sampling
             and train_sampling_probabilities is not None
             and args.balanced_sampling_mix_ratio > 0
@@ -3543,10 +3610,111 @@ def train(ep, parallel_train=False):
         ).astype("int32")
         train_idx_list = np.concatenate([normal_indices, balanced_indices]).astype("int32")
         np.random.shuffle(train_idx_list)
+    natural_loss_sum = 0.0
+    natural_batch_count = 0
+    balanced_intent_loss_sum = 0.0
+    balanced_intent_batch_count = 0
+    future_correct_sum = 0.0
+    future_metric_count = 0
+    history_future_cosine_sum = 0.0
+
+    def future_teacher_objective(history_feature, batch_src, batch_target, labels, decidability):
+        if not args.use_future_enhanced_intent:
+            return torch.zeros((), device=batch_src.device), {}
+        return model.future_enhanced_intent_loss(
+            history_feature,
+            batch_src,
+            batch_target,
+            labels,
+            decidability=decidability,
+            alignment_weight=args.future_intent_alignment_weight,
+        )
+
+    def run_balanced_intent_batch(batch_indices):
+        nonlocal future_correct_sum, future_metric_count, history_future_cosine_sum
+        aux_delta = torch.stack([X_train[i][:input_length, in_cols] for i in batch_indices]).to(device)
+        aux_src = torch.stack([X_train[i][:input_length, in_cols] for i in batch_indices]).to(device)
+        aux_target = torch.stack([
+            X_train[i][input_length:input_length + target_length, src_cols]
+            for i in batch_indices
+        ]).to(device)
+        aux_route_target = (
+            None if X_train_route_ids is None
+            else X_train_route_ids[batch_indices].to(device)
+        )
+        aux_route_decidability = (
+            None if X_train_route_decidability is None
+            else X_train_route_decidability[batch_indices].to(device)
+        )
+        aux_subroute_target = (
+            None if X_train_subroute_ids is None
+            else X_train_subroute_ids[batch_indices].to(device)
+        )
+        aux_subroute_decidability = (
+            None if X_train_subroute_decidability is None
+            else X_train_subroute_decidability[batch_indices].to(device)
+        )
+        aux_semantic_feature = semantic_features_for_contexts(
+            None if X_train_contexts is None else X_train_contexts[batch_indices]
+        )
+
+        optimizer.zero_grad()
+        (
+            _,
+            _,
+            aux_route_logits,
+            aux_subroute_logits,
+            _,
+            aux_subroute_feature,
+            aux_route_decidability_logits,
+            aux_subroute_decidability_logits,
+        ) = unpack_model_output(
+            model(
+                aux_delta,
+                aux_src,
+                semantic_feature=aux_semantic_feature,
+                intent_only=True,
+            )
+        )
+        aux_loss = compute_intent_objective(
+            route_logits=aux_route_logits,
+            route_target=aux_route_target,
+            route_decidability=aux_route_decidability,
+            route_decidability_logits=aux_route_decidability_logits,
+            subroute_logits=aux_subroute_logits,
+            subroute_target=aux_subroute_target,
+            subroute_feature=aux_subroute_feature,
+            subroute_decidability=aux_subroute_decidability,
+            subroute_decidability_logits=aux_subroute_decidability_logits,
+            use_class_weights=False,
+        )
+        future_loss, future_stats = future_teacher_objective(
+            aux_subroute_feature,
+            aux_src,
+            aux_target,
+            aux_subroute_target,
+            aux_subroute_decidability,
+        )
+        aux_loss = aux_loss + args.future_intent_loss_weight * future_loss
+        scaled_aux_loss = args.balanced_intent_loss_weight * aux_loss
+        scaled_aux_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+        optimizer.step()
+        if future_stats:
+            future_correct_sum += float(future_stats["future_acc"].detach().cpu())
+            history_future_cosine_sum += float(
+                future_stats["history_future_cosine"].detach().cpu()
+            )
+            future_metric_count += 1
+        return float(aux_loss.detach().cpu())
+
     ADE_list = []
     FDE_list = []
     rmse_cog_list = []
     rmse_sog_list = []
+    main_batch_count = max(int(np.ceil(len(train_idx_list) / batch_size)), 1)
+    aux_batch_total = int(np.ceil(len(balanced_intent_indices) / batch_size))
+    aux_batch_cursor = 0
     for idx in range(0, len(train_idx_list), batch_size):
         batch_indices = train_idx_list[idx:idx + batch_size]
         delta = torch.stack([X_train[i][:input_length, in_cols] for i in batch_indices]).cuda()
@@ -3621,6 +3789,14 @@ def train(ep, parallel_train=False):
             subroute_decidability=batch_decidability,
             subroute_decidability_logits=subroute_decidability_logits,
         )
+        future_loss, future_stats = future_teacher_objective(
+            subroute_feature,
+            src,
+            value_target,
+            subroute_target,
+            batch_decidability,
+        )
+        loss = loss + args.future_intent_loss_weight * future_loss
         if args.use_candidate_selector:
             candidate_result = prepare_candidate_prediction(
                 delta,
@@ -3685,10 +3861,30 @@ def train(ep, parallel_train=False):
         sample += 1
         epoch_total_loss += loss.item()
         epoch_sample += 1
+        natural_loss_sum += loss.item()
+        natural_batch_count += 1
+        if future_stats:
+            future_correct_sum += float(future_stats["future_acc"].detach().cpu())
+            history_future_cosine_sum += float(
+                future_stats["history_future_cosine"].detach().cpu()
+            )
+            future_metric_count += 1
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
         optimizer.step()
+
+        completed_main_batches = idx // batch_size + 1
+        target_aux_batches = int(round(
+            completed_main_batches * aux_batch_total / main_batch_count
+        ))
+        while aux_batch_cursor < target_aux_batches:
+            aux_start = aux_batch_cursor * batch_size
+            aux_indices = balanced_intent_indices[aux_start:aux_start + batch_size]
+            if len(aux_indices) > 0:
+                balanced_intent_loss_sum += run_balanced_intent_batch(aux_indices)
+                balanced_intent_batch_count += 1
+            aux_batch_cursor += 1
 
         if idx > 0 and idx % (10 * batch_size) == 0:
             cur_loss = total_loss / sample
@@ -3696,7 +3892,23 @@ def train(ep, parallel_train=False):
             total_loss = 0.0
             sample = 0
 
-    return epoch_total_loss / max(epoch_sample, 1)
+    return {
+        "loss": epoch_total_loss / max(epoch_sample, 1),
+        "natural_loss": natural_loss_sum / max(natural_batch_count, 1),
+        "balanced_intent_loss": (
+            balanced_intent_loss_sum / max(balanced_intent_batch_count, 1)
+            if balanced_intent_batch_count > 0 else 0.0
+        ),
+        "balanced_intent_batches": balanced_intent_batch_count,
+        "future_teacher_acc": (
+            future_correct_sum / max(future_metric_count, 1)
+            if future_metric_count > 0 else 0.0
+        ),
+        "history_future_cosine": (
+            history_future_cosine_sum / max(future_metric_count, 1)
+            if future_metric_count > 0 else 0.0
+        ),
+    }
 
 
 def data_prepare(data, train_scale, valid_scale, lay_data=True, fit_indices=None):
@@ -3899,6 +4111,16 @@ if __name__ == '__main__':
     parser.add_argument("--balanced_sampling_alpha", type=float, default=0.3)
     parser.add_argument("--balanced_sampling_max_ratio", type=float, default=5.0)
     parser.add_argument("--balanced_sampling_mix_ratio", type=float, default=0.3)
+    parser.add_argument("--use_decoupled_balanced_intent_training", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--balanced_intent_ratio", type=float, default=0.2)
+    parser.add_argument("--balanced_intent_loss_weight", type=float, default=0.35)
+    parser.add_argument("--balanced_intent_warmup_epochs", type=int, default=3)
+    parser.add_argument("--use_future_enhanced_intent", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--future_intent_dim", type=int, default=64)
+    parser.add_argument("--future_intent_temperature", type=float, default=0.2)
+    parser.add_argument("--future_intent_logit_weight", type=float, default=0.15)
+    parser.add_argument("--future_intent_loss_weight", type=float, default=0.08)
+    parser.add_argument("--future_intent_alignment_weight", type=float, default=0.5)
     parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--early_stop_metric", choices=["loss", "ade", "ade_fde"], default="loss")
     parser.add_argument("--early_stop_fde_weight", type=float, default=0.2)
@@ -4166,6 +4388,26 @@ if __name__ == '__main__':
         raise ValueError("--balanced_sampling_max_ratio must be at least 1.")
     if not 0 <= args.balanced_sampling_mix_ratio <= 1:
         raise ValueError("--balanced_sampling_mix_ratio must be between 0 and 1.")
+    if args.use_decoupled_balanced_intent_training and not args.use_balanced_subroute_sampling:
+        raise ValueError(
+            "--use_decoupled_balanced_intent_training requires --use_balanced_subroute_sampling."
+        )
+    if not 0 <= args.balanced_intent_ratio <= 1:
+        raise ValueError("--balanced_intent_ratio must be between 0 and 1.")
+    if args.balanced_intent_loss_weight < 0:
+        raise ValueError("--balanced_intent_loss_weight must be non-negative.")
+    if args.balanced_intent_warmup_epochs < 1:
+        raise ValueError("--balanced_intent_warmup_epochs must be at least 1.")
+    if args.use_future_enhanced_intent and not args.use_subroute_intent_head:
+        raise ValueError("--use_future_enhanced_intent requires --use_subroute_intent_head.")
+    if args.future_intent_dim < 2:
+        raise ValueError("--future_intent_dim must be at least 2.")
+    if args.future_intent_temperature <= 0:
+        raise ValueError("--future_intent_temperature must be positive.")
+    if args.future_intent_logit_weight < 0 or args.future_intent_loss_weight < 0:
+        raise ValueError("Future-intent weights must be non-negative.")
+    if args.future_intent_alignment_weight < 0:
+        raise ValueError("--future_intent_alignment_weight must be non-negative.")
     if args.patience < 1:
         raise ValueError("--patience must be at least 1.")
     if args.early_stop_fde_weight < 0:
@@ -4320,7 +4562,8 @@ if __name__ == '__main__':
     )
     logger.info(
         "Subroute balance: class_weight=%s(alpha=%.3f,max_ratio=%.3f), "
-        "balanced_sampling=%s(alpha=%.3f,max_ratio=%.3f,mix=%.3f).",
+        "balanced_sampling=%s(alpha=%.3f,max_ratio=%.3f,mix=%.3f), "
+        "decoupled_intent=%s(ratio=%.3f,loss_weight=%.3f,warmup=%d).",
         args.use_subroute_class_weight,
         args.subroute_class_weight_alpha,
         args.subroute_class_weight_max_ratio,
@@ -4328,6 +4571,20 @@ if __name__ == '__main__':
         args.balanced_sampling_alpha,
         args.balanced_sampling_max_ratio,
         args.balanced_sampling_mix_ratio,
+        args.use_decoupled_balanced_intent_training,
+        args.balanced_intent_ratio,
+        args.balanced_intent_loss_weight,
+        args.balanced_intent_warmup_epochs,
+    )
+    logger.info(
+        "Future-enhanced intent: enabled=%s(dim=%d,temp=%.3f,logit_weight=%.3f,"
+        "loss_weight=%.3f,alignment_weight=%.3f); true future is training-only.",
+        args.use_future_enhanced_intent,
+        args.future_intent_dim,
+        args.future_intent_temperature,
+        args.future_intent_logit_weight,
+        args.future_intent_loss_weight,
+        args.future_intent_alignment_weight,
     )
     logger.info(
         "Subroute staged supervision: enabled=%s, min_hard_weight=%.3f, "
@@ -5002,12 +5259,20 @@ if __name__ == '__main__':
                 )
 
             if args.use_balanced_subroute_sampling:
+                # The decoupled stream balances classes first. Decidability is applied
+                # inside its losses, so multiplying it into sampling here would remove
+                # shared-trunk tail classes before they can learn a future prototype.
+                sampling_supervision_weights = (
+                    None
+                    if args.use_decoupled_balanced_intent_training
+                    else supervision_weights
+                )
                 train_sampling_probabilities = make_balanced_sampling_probabilities(
                     X_train_window_subroute_ids,
                     subroute_class_count,
                     args.balanced_sampling_alpha,
                     args.balanced_sampling_max_ratio,
-                    supervision_weights=supervision_weights,
+                    supervision_weights=sampling_supervision_weights,
                 )
                 if train_sampling_probabilities is not None:
                     natural_mass = np.bincount(
@@ -5020,16 +5285,30 @@ if __name__ == '__main__':
                         weights=train_sampling_probabilities,
                         minlength=subroute_class_count,
                     )
-                    mixed_mass = (
-                        (1.0 - args.balanced_sampling_mix_ratio) * natural_mass
-                        + args.balanced_sampling_mix_ratio * balanced_mass
-                    )
-                    logger.info(
-                        "Fold %d/%d subroute sampling expected class ratio: %s.",
-                        fold,
-                        args.folds,
-                        format_class_values(mixed_mass, subroute_classes),
-                    )
+                    if args.use_decoupled_balanced_intent_training:
+                        logger.info(
+                            "Fold %d/%d natural trajectory stream class ratio: %s.",
+                            fold,
+                            args.folds,
+                            format_class_values(natural_mass, subroute_classes),
+                        )
+                        logger.info(
+                            "Fold %d/%d balanced intent-only stream class ratio: %s.",
+                            fold,
+                            args.folds,
+                            format_class_values(balanced_mass, subroute_classes),
+                        )
+                    else:
+                        mixed_mass = (
+                            (1.0 - args.balanced_sampling_mix_ratio) * natural_mass
+                            + args.balanced_sampling_mix_ratio * balanced_mass
+                        )
+                        logger.info(
+                            "Fold %d/%d subroute sampling expected class ratio: %s.",
+                            fold,
+                            args.folds,
+                            format_class_values(mixed_mass, subroute_classes),
+                        )
         logger.info(
             "Fold %d/%d prepared, tracks train/valid/test %d/%d/%d, windows train/valid/test %d/%d/%d.",
             fold,
@@ -5100,9 +5379,13 @@ if __name__ == '__main__':
                               candidate_base_prior_bias=args.candidate_base_prior_bias,
                               use_semantic_teacher=args.use_qwen_semantic_teacher,
                               semantic_feature_dim=semantic_feature_dim,
-                              semantic_hidden_dim=args.semantic_hidden_dim,
-                              semantic_fusion_weight=args.semantic_fusion_weight,
-                              semantic_dropout=args.semantic_dropout).to(device)
+                               semantic_hidden_dim=args.semantic_hidden_dim,
+                               semantic_fusion_weight=args.semantic_fusion_weight,
+                               semantic_dropout=args.semantic_dropout,
+                               use_future_enhanced_intent=args.use_future_enhanced_intent,
+                               future_intent_dim=args.future_intent_dim,
+                               future_intent_temperature=args.future_intent_temperature,
+                               future_intent_logit_weight=args.future_intent_logit_weight).to(device)
         awl = AutomaticWeightedLoss(2).cuda()
         if fold == 1:
             model_logger.info("number of parameters: %.6e", count_parameters(model))
@@ -5227,8 +5510,23 @@ if __name__ == '__main__':
                 candidate_selector_runtime_active,
                 args.candidate_selector_warmup_epochs,
             )
-            train_loss = train(ep, parallel_train=False)
-            logger.info("Training, fold %d/%d, epoch %03d, loss %.5f, lr %.6e.", fold, args.folds, ep, train_loss, lr)
+            train_stats = train(ep, parallel_train=False)
+            train_loss = train_stats["loss"]
+            logger.info(
+                "Training, fold %d/%d, epoch %03d, loss %.5f, lr %.6e, "
+                "natural_loss %.5f, balanced_intent_loss %.5f (%d batches), "
+                "future_teacher_acc %.1f%%, history_future_cosine %.3f.",
+                fold,
+                args.folds,
+                ep,
+                train_loss,
+                lr,
+                train_stats["natural_loss"],
+                train_stats["balanced_intent_loss"],
+                train_stats["balanced_intent_batches"],
+                100.0 * train_stats["future_teacher_acc"],
+                train_stats["history_future_cosine"],
+            )
 
             vloss, vade, vfde, vrmse_cog, vrmse_sog = evaluate(
                 X_valid,

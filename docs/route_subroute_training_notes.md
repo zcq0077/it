@@ -719,3 +719,45 @@ qwen_same_route_hard_weight = 1.5
 ```
 
 推理时真实未来不会输入 Qwen。Qwen 分数仍需通过独立验证集校准；只有融合后的候选胜者准确率和轨迹代价达到增益要求，最终测试才启用。若共享主干上的历史对所有子路反推结果都相同，Qwen 应保持不确定，而不能凭空确定未来分支。
+
+## 16. 小类解耦双流训练
+
+旧版均衡采样会用重复的小类窗口替换一部分自然训练窗口，因此小类不仅影响分类头，也会重复参与轨迹回归和候选生成。小类噪声较大时，可能出现小类识别提高但总体 ADE/FDE 反而变差。
+
+当前版本把训练拆成两条流：
+
+1. 自然轨迹流完整遍历原始训练窗口，负责轨迹回归、主/子航路意图和候选生成。
+2. 小类均衡流按训练集频次额外抽样，只计算主/子航路分类、可判别性、对比表示和未来意图原型，不运行轨迹解码器。
+3. 辅助流不再叠加 class weight，避免“重采样 + 类权重 + Focal loss”三重补偿。
+4. 前几轮逐步增加辅助流强度，先学习基本运动规律，再强化尾部航路。
+
+```python
+use_decoupled_balanced_intent_training = True
+balanced_intent_ratio = 0.20
+balanced_intent_loss_weight = 0.35
+balanced_intent_warmup_epochs = 3
+```
+
+训练日志中的 `natural_loss` 是完整自然流损失，`balanced_intent_loss` 是未乘辅助权重前的意图流损失，括号中记录该轮实际执行的辅助批次数。
+
+## 17. Future-enhanced 子航路意图原型
+
+训练阶段允许使用真实未来作为监督，但验证和推理不能读取未来。当前版本把真实未来经纬度转成相对于最后一个历史点的位移序列，再编码为未来意图向量。每个紧凑子航路维护一个可学习原型：
+
+1. 未来向量学习识别其真实子航路，使原型表示该分支后续的典型走向。
+2. 只有历史可判别性较高时，历史向量才会被拉向对应未来向量。
+3. 不可判别窗口的历史-未来对齐权重接近零，避免把相同历史强行映射成互相冲突的唯一未来。
+4. 推理时只用历史向量匹配已经学好的原型，并把匹配分数作为原子航路 logits 的温和残差。
+
+```python
+use_future_enhanced_intent = True
+future_intent_dim = 64
+future_intent_temperature = 0.20
+future_intent_logit_weight = 0.15
+future_intent_loss_weight = 0.08
+future_intent_alignment_weight = 0.50
+```
+
+`future_teacher_acc` 衡量训练期真实未来能否匹配正确意图原型；`history_future_cosine` 衡量可判别历史与真实未来表示的一致性。这两个指标用于诊断原型是否学起来，不能替代测试集的子航路 Top-1、Top-2 recall 和 ADE/FDE。
+
+该方法主要帮助“样本少但历史已出现微弱分叉信号”的 OA_S02、OB2 等类别。对于历史信息确实不足的 OA_S00，它更重要的作用是维持独立候选原型，而不是保证分叉前 Top-1 必然选对。

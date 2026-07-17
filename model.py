@@ -292,7 +292,9 @@ class iTentformer(nn.Module):
                  candidate_base_prior_bias=0.5,
                  use_semantic_teacher=False, semantic_feature_dim=0,
                  semantic_hidden_dim=128, semantic_fusion_weight=0.25,
-                 semantic_dropout=0.15):
+                 semantic_dropout=0.15,
+                 use_future_enhanced_intent=False, future_intent_dim=64,
+                 future_intent_temperature=0.2, future_intent_logit_weight=0.15):
         super().__init__()
         self.target_length = int(target_length)
         self.TCN = TCN(input_size_tcn, local_intent_size, num_channels, kernel_size, dropout=dropout)
@@ -357,6 +359,14 @@ class iTentformer(nn.Module):
         )
         self.semantic_feature_dim = int(semantic_feature_dim)
         self.semantic_fusion_weight = float(semantic_fusion_weight)
+        self.use_future_enhanced_intent = bool(
+            use_future_enhanced_intent
+            and self.use_subroute_intent_head
+            and subroute_classes > 0
+        )
+        self.future_intent_dim = int(future_intent_dim)
+        self.future_intent_temperature = float(future_intent_temperature)
+        self.future_intent_logit_weight = float(future_intent_logit_weight)
 
         if route_prototypes is not None:
             self.register_buffer("route_prototypes", route_prototypes.float())
@@ -435,6 +445,24 @@ class iTentformer(nn.Module):
                 self.subroute_to_intent = nn.Linear(subroute_embedding_dim, feature_dim)
             if self.use_semantic_teacher:
                 self.semantic_subroute_head = nn.Linear(feature_dim, subroute_classes, bias=False)
+            if self.use_future_enhanced_intent:
+                self.history_future_projector = nn.Sequential(
+                    nn.LayerNorm(feature_dim),
+                    nn.Linear(feature_dim, self.future_intent_dim),
+                    nn.GELU(),
+                    nn.LayerNorm(self.future_intent_dim),
+                )
+                self.future_motion_encoder = nn.Sequential(
+                    nn.LayerNorm(self.target_length * 2),
+                    nn.Linear(self.target_length * 2, self.future_intent_dim),
+                    nn.GELU(),
+                    nn.Linear(self.future_intent_dim, self.future_intent_dim),
+                    nn.LayerNorm(self.future_intent_dim),
+                )
+                self.future_intent_prototypes = nn.Embedding(
+                    subroute_classes,
+                    self.future_intent_dim,
+                )
 
         if self.use_candidate_selector:
             selector_input_dim = (
@@ -480,6 +508,88 @@ class iTentformer(nn.Module):
         )
         fused = intent_feature + self.semantic_fusion_weight * gate * semantic_latent
         return fused, semantic_latent
+
+    def _future_mode_logits(self, history_feature):
+        if not self.use_future_enhanced_intent:
+            return None
+        history_embedding = F.normalize(
+            self.history_future_projector(history_feature),
+            dim=-1,
+            eps=1e-6,
+        )
+        prototypes = F.normalize(
+            self.future_intent_prototypes.weight,
+            dim=-1,
+            eps=1e-6,
+        )
+        return torch.matmul(history_embedding, prototypes.T) / max(
+            self.future_intent_temperature,
+            1e-6,
+        )
+
+    def future_enhanced_intent_loss(
+            self,
+            history_feature,
+            src,
+            future_target,
+            subroute_target,
+            decidability=None,
+            alignment_weight=0.5,
+    ):
+        """Use the true future only as a training-time teacher for intent prototypes."""
+        if not self.use_future_enhanced_intent:
+            return torch.zeros((), device=src.device), {}
+        if history_feature is None or subroute_target is None:
+            return torch.zeros((), device=src.device), {}
+
+        relative_future = future_target[:, :, 1:3] - src[:, -1:, 1:3]
+        future_embedding = F.normalize(
+            self.future_motion_encoder(relative_future.reshape(relative_future.size(0), -1)),
+            dim=-1,
+            eps=1e-6,
+        )
+        history_embedding = F.normalize(
+            self.history_future_projector(history_feature),
+            dim=-1,
+            eps=1e-6,
+        )
+        prototypes = F.normalize(
+            self.future_intent_prototypes.weight,
+            dim=-1,
+            eps=1e-6,
+        )
+        future_logits = torch.matmul(future_embedding, prototypes.T) / max(
+            self.future_intent_temperature,
+            1e-6,
+        )
+        future_classification = F.cross_entropy(
+            future_logits,
+            subroute_target.long(),
+        )
+
+        alignment_values = 1.0 - torch.sum(
+            history_embedding * future_embedding.detach(),
+            dim=-1,
+        )
+        if decidability is None:
+            alignment = alignment_values.mean()
+        else:
+            weights = decidability.to(
+                device=alignment_values.device,
+                dtype=alignment_values.dtype,
+            ).clamp(0.0, 1.0)
+            alignment = torch.sum(alignment_values * weights) / weights.sum().clamp_min(1.0)
+
+        loss = future_classification + float(alignment_weight) * alignment
+        with torch.no_grad():
+            future_acc = torch.mean(
+                (torch.argmax(future_logits, dim=-1) == subroute_target.long()).float()
+            )
+            mean_alignment = torch.mean(1.0 - alignment_values)
+        return loss, {
+            "future_acc": future_acc,
+            "history_future_cosine": mean_alignment,
+        }
 
     def _routing_prob(
             self,
@@ -739,6 +849,7 @@ class iTentformer(nn.Module):
             teacher_forcing_ratio=0.0,
             route_supervision_weight=None,
             subroute_supervision_weight=None,
+            intent_only=False,
     ):
         intent = self.TCN(delta)
         route_logits = None
@@ -787,6 +898,12 @@ class iTentformer(nn.Module):
                 subroute_logits = subroute_logits + self.semantic_fusion_weight * self.semantic_subroute_head(
                     semantic_latent
                 )
+            future_mode_logits = self._future_mode_logits(subroute_feature)
+            if future_mode_logits is not None and self.future_intent_logit_weight > 0:
+                subroute_logits = (
+                    subroute_logits
+                    + self.future_intent_logit_weight * future_mode_logits
+                )
             if self.use_learned_decidability:
                 subroute_decidability_logits = self.subroute_decidability_head(subroute_feature).squeeze(-1)
             prototype_prior = self._prototype_prior_logits(src, self.subroute_prototypes)
@@ -827,6 +944,18 @@ class iTentformer(nn.Module):
                 subroute_emb = torch.matmul(subroute_prob, self.subroute_embedding.weight)
                 intent_bias = self.subroute_to_intent(subroute_emb).unsqueeze(1)
                 intent = intent + intent_bias
+
+        if intent_only:
+            return (
+                None,
+                None,
+                route_logits,
+                subroute_logits,
+                route_feature,
+                subroute_feature,
+                route_decidability_logits,
+                subroute_decidability_logits,
+            )
 
         out, _ = self.TrajModel(src.transpose(1, 2), intent)
         out_intent = self.TCN.linear_intent(intent)
