@@ -2,7 +2,7 @@
 
 The output is aligned with ``text_pool`` in the voyage-context sidecar. It
 never reads route labels or future trajectory points, so the same embeddings
-can be shared by all cross-validation folds without label leakage.
+can be shared across fixed dataset splits without label leakage.
 """
 
 from argparse import ArgumentParser

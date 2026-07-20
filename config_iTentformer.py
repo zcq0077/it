@@ -1,4 +1,4 @@
-"""iTentformer experiment config.
+﻿"""iTentformer experiment config.
 
 这个文件就是 iTentformer 的默认参数总表。现在直接运行：
 
@@ -8,7 +8,8 @@
 
     python iTentformer.py --epochs 1 --run_name smoke
 
-当前默认数据集是 2023 年 6 月 + 7 月 + 8 月 DMA 四类航路数据：
+当前默认数据集是 2023 年 6 月至 10 月 DMA 四类航路数据；
+9 月和 10 月仅补入经过固定原型、距离阈值和 MMSI 隔离筛选的 OA_S00 轨迹：
 
     OA  : 从 O 区域到 A 区域的航路
     OB1 : 从 O 区域到 B1 区域的航路
@@ -27,42 +28,41 @@ class Config:
     # 模型要读取的 pkl 数据。里面每条轨迹已经处理成 iTentformer 需要的 15 列格式：
     # [MMSI, Length, Course, Lon, Lat, SOG, vx, vy,
     #  delta_Course, delta_Lon, delta_Lat, delta_SOG, delta_vx, delta_vy, UnixTime]
-    data_path = "dataset/dma_raw_2023_06_07_08/dma_itentformer_ti_4class_revnorm_lasthit.pkl"
+    data_path = "dataset/dma_raw_2023_06_07_08_plus_09_10_oa_s00/dma_2023_06_07_08_plus_09_10_oa_s00_target350.pkl"
 
-    # 由utils/build_dma_voyage_context.py生成，与当前三个月轨迹数据逐点对齐。
+    # 由utils/build_dma_voyage_context.py生成，与当前增量轨迹数据逐点对齐。
     # 侧车只保存每个历史时刻之前最后已知的船型、吃水、Destination等语义信息。
-    voyage_context_path = "dataset/dma_raw_2023_06_07_08/dma_voyage_context_2023_06_07_08.pkl"
+    voyage_context_path = "dataset/dma_raw_2023_06_07_08_plus_09_10_oa_s00/dma_2023_06_07_08_plus_09_10_oa_s00_target350_voyage_context.pkl"
 
     # 千问语义教师：该侧车只包含预测时刻之前航次文本的冻结向量，
-    # 不读取航路标签和真实未来，因此可以安全地跨折复用。
+    # 不读取航路标签和真实未来，因此可以安全地跨不同固定划分复用。
     # 先运行 utils/build_qwen_semantic_teacher.py 生成该文件。
     use_qwen_semantic_teacher = True
-    qwen_semantic_path = "dataset/dma_raw_2023_06_07_08/dma_qwen_semantic_teacher_v1.pkl"
+    qwen_semantic_path = "dataset/dma_raw_2023_06_07_08_plus_09_10_oa_s00/dma_2023_06_07_08_plus_09_10_oa_s00_target350_qwen_semantic.pkl"
     semantic_hidden_dim = 128
     # 语义仅作为温和软先验，避免错误Destination压过历史轨迹。
     semantic_fusion_weight = 0.25
     semantic_dropout = 0.20
 
-    # 加入船舶静态/航次信息后必须按MMSI分组，避免同一艘船同时出现在训练和测试中。
-    group_folds_by_mmsi = True
-
-    # 固定传统划分：70%训练、10%验证、20%测试，只训练一次。
+    # 固定传统划分：按MMSI分组，约70%训练、10%验证、20%测试，只训练一次。
+    # 同一艘船不会同时进入训练、验证和测试集，避免语义信息造成身份泄漏。
     # 第一次运行会生成划分清单，之后始终复用，保证不同模型公平比较。
-    # 改回 "kfold" 可恢复原来的5折交叉验证。
-    split_mode = "fixed"
     test_ratio = 0.20
     split_seed = 42
-    split_manifest_path = "dataset/dma_raw_2023_06_07_08/dma_fixed_split_70_10_20_seed42.json"
+    # 固定训练随机种子，保证不同参数组合尽量只比较参数本身的影响。
+    # 数据划分仍由 split_seed 和固定 manifest 单独控制。
+    train_seed = 42
+    split_manifest_path = "dataset/dma_raw_2023_06_07_08_plus_09_10_oa_s00/dma_2023_06_07_08_plus_09_10_oa_s00_target350_fixed_split.json"
 
     # 每条轨迹对应的航路类别标签。当前包含 OA / OB1 / OB2 / OC 四类。
     # 这个文件不是模型输入特征，主要用于：
-    # 1. K 折划分时尽量让每折都有各类航路；
+    # 1. 固定划分时尽量让训练、验证、测试集都有各类航路；
     # 2. 测试集可视化时按类别均衡抽样；
     # 3. 日志里统计每类轨迹数量，方便检查数据是否偏。
-    route_labels_path = "dataset/dma_raw_2023_06_07_08/dma_route_labels_ti_4class_revnorm_lasthit.json"
+    route_labels_path = "dataset/dma_raw_2023_06_07_08_plus_09_10_oa_s00/dma_2023_06_07_08_plus_09_10_oa_s00_target350_route_labels.json"
 
-    # True：按航路类别分层 K 折，推荐打开。
-    # False：普通随机 K 折，可能出现某一折里某类航路很少。
+    # True：固定划分时兼顾大类航路比例，推荐打开。
+    # False：只按MMSI随机分组，某些集合中的小类比例可能偏低。
     stratify_by_route = True
 
     # 大类航路分类辅助头。模型会先学习当前历史轨迹更像 OA/OB1/OB2/OC 哪一类。
@@ -86,9 +86,9 @@ class Config:
 
     # 细分子航路标签，由 utils/discover_subroutes.py 生成。
     # 它会把 OA/OB1/OB2/OC 继续细化为 OA_S00、OB1_S01、OC_S02 等小分支。
-    subroute_labels_path = "dataset/dma_raw_2023_06_07_08/dma_subroutes_ti_4class_compact6_v1_labels.json"
+    subroute_labels_path = "dataset/dma_raw_2023_06_07_08_plus_09_10_oa_s00/dma_2023_06_07_08_plus_09_10_oa_s00_target350_subroute_labels.json"
 
-    # True：K 折划分时按子航路分层，比只按 OA/OB1/OB2/OC 更细。
+    # True：固定划分时优先兼顾子航路比例，比只看 OA/OB1/OB2/OC 更细。
     # 如果子航路数量太多且某些类样本很少，可以改回 False。
     stratify_by_subroute = True
 
@@ -100,6 +100,15 @@ class Config:
     # 再融合回轨迹预测分支，让“像哪条小航路”真正影响未来轨迹预测。
     use_subroute_embedding = True
     subroute_embedding_dim = 16
+
+    # 通用子航路残差专家：共享解码器先学习所有船都遵循的运动规律，
+    # 再由每个子航路的小专家修正该分支特有的转弯和横向偏移。
+    # 专家由标签中的全部子航路自动建立，不区分六月/九月，也不识别“新增数据”。
+    # 最后一层从0开始，scale保持温和，避免小类专家一开始把主航路预测拉乱。
+    use_subroute_residual_experts = True
+    subroute_residual_hidden_dim = 32
+    subroute_residual_scale = 0.25
+    subroute_residual_dropout = 0.10
 
     # 子航路判断使用“历史均值 + 最后位置 + 首尾变化”三部分特征。
     # 相比只做全历史平均，它更容易捕捉接近分岔口和刚开始转向的信号。
@@ -137,7 +146,7 @@ class Config:
     candidate_subroutes_per_route = 2
 
     # 紧凑版只有 6 个子航路，直接把全部子航路放进候选池并自动绑定所属大类。
-    # 这样低先验的小分支也有被千问反推纠正的机会；正确子航路不在候选池时任何重排器都无法恢复。
+    # 这样低先验的小分支也能被学习式候选选择器看到；正确子航路不在候选池时无法恢复。
     candidate_pool_strategy = "all_subroutes"
     candidate_max_subroutes = 8
     candidate_selector_hidden_dim = 64
@@ -160,68 +169,6 @@ class Config:
     candidate_calibration_min_cost_gain = 0.0
     candidate_include_target_during_training = True
 
-    # 千问候选重排器。主模型训练结束后，冻结本地 Qwen3-1.7B，使用数值软提示比较：
-    # 基础预测 + Top-2 大类各自 Top-2 子航路，共 5 条候选，最终仍只输出一条。
-    # 千问不直接生成经纬度，也不会把 4GB 权重复制进 iTentformer checkpoint；
-    # 这里只训练并单独保存数值适配器和打分头，便于关闭后做消融实验。
-    # 旧的训练后候选重排器在验证集未获得可靠增益，默认关闭并保留作消融实验。
-    use_qwen_reranker = False
-    qwen_model_path = r"D:\Jason1982\wsl\Models\Qwen3-1.7B"
-
-    # None：每折自动保存为 model_dir/model_prefix_Kx_qwen_reranker.pt。
-    # eval_only=True 时也会从这个位置自动加载；需要手工指定时再填写完整路径。
-    qwen_adapter_path = None
-
-    # 第二阶段只抽取一部分窗口，优先学习原筛选器选错、候选存在分歧的困难样本。
-    # 这不会重新训练主模型，显存和时间都比把千问塞进 50 轮主训练稳定得多。
-    qwen_reranker_epochs = 3
-    qwen_reranker_batch_size = 4
-    qwen_train_max_windows = 4096
-    qwen_valid_max_windows = 1024
-    qwen_hard_sample_ratio = 0.7
-
-    # 数值特征先映射成 2048 维 Qwen soft token；仅下面的小适配器参与训练。
-    qwen_adapter_dim = 64
-    qwen_reranker_lr = 2e-4
-    qwen_reranker_weight_decay = 1e-4
-    qwen_reranker_clip = 1.0
-    qwen_gradient_checkpointing = True
-
-    # 千问分数与原候选筛选器分数的融合权重。过大可能让小样本重排器反客为主。
-    qwen_reranker_weight = 0.5
-    qwen_cost_temperature = 0.25
-    qwen_cost_regression_weight = 0.2
-    qwen_fused_loss_weight = 0.5
-
-    # 反事实重排额外强化“真实优胜候选必须压过错误候选”，并重点照顾同一大类内选错子路的样本。
-    qwen_pairwise_weight = 0.4
-    qwen_pairwise_margin = 0.3
-    qwen_pairwise_min_cost_gap = 0.01
-    qwen_same_route_hard_weight = 1.5
-    qwen_calibration_max_apply_ratio = 0.35
-    qwen_context_max_tokens = 64
-    qwen_context_dropout = 0.15
-
-    # 只在大类置信度低、前两类接近，或候选筛选器前两名接近时调用千问。
-    # 高置信度简单样本继续走原模型，减少推理耗时，也保护已经预测正确的大类。
-    qwen_uncertain_only = True
-    qwen_uncertainty_confidence_threshold = 0.85
-    qwen_uncertainty_margin_threshold = 0.25
-
-    # 千问只重点学习“原选择器会选错、但候选池里有明显更好轨迹”的窗口。
-    # min_oracle_gain 越大，样本越纯但数量越少；winner_gap 过滤掉多个候选几乎一样好的模糊样本。
-    # gain_weight 会给高收益纠错样本更高 loss 权重，避免被大量普通样本淹没。
-    qwen_focus_high_gain = True
-    qwen_min_oracle_gain_nmi = 0.03
-    qwen_min_winner_gap_nmi = 0.02
-    qwen_gain_weight = 2.0
-
-    # 只有验证集候选优胜者准确率至少提升 0.5 个百分点，正式测试才启用千问。
-    # 如果没有达到，适配器仍会保存供诊断，但自动回退到原候选筛选器，避免负优化。
-    qwen_require_validation_gain = True
-    qwen_min_validation_gain = 0.5
-    qwen_min_validation_cost_gain = 0.005
-
     # 训练前期用真实子航路帮助预测器学会“不同标签对应不同走向”，
     # 随训练逐步切换为模型自己的分类结果，减小训练和推理之间的差异。
     use_branch_teacher_forcing = True
@@ -229,12 +176,12 @@ class Config:
     branch_teacher_forcing_end = 0.1
     branch_teacher_forcing_decay_epochs = 30
 
-    # 主航路同样使用每折训练集原型，优先修正 OB1 被判断成 OA 一类的大类错误。
+    # 主航路同样只使用固定训练集原型，优先修正 OB1 被判断成 OA 一类的大类错误。
     use_route_prototype_prior = True
     route_prototype_points = 32
     route_prototype_weight = 0.6
 
-    # 每一折只使用该折训练轨迹构建子航路平均原型，不读取验证集或测试集。
+    # 只使用固定训练集轨迹构建子航路平均原型，不读取验证集或测试集。
     # 当前轨迹越接近某条原型线、行进方向越一致，该子航路的分类分数越高。
     # 它主要在已经接近或进入分岔区域后提供帮助，共享主航道上不会凭空知道未来选择。
     use_subroute_prototype_prior = True
@@ -268,7 +215,7 @@ class Config:
     # 分阶段子航路监督：只使用历史窗口判断“此刻是否已经能看出分支意图”。
     # 分叉前，各子航路历史几乎重合，最终标签只保留 5% 的硬分类权重，并学习同一大类内的软分布；
     # 接近或进入分叉后，历史与真实子航路原型逐渐匹配，硬标签、对比损失和教师强制才逐步恢复。
-    # 原型只由当前折训练集建立，计算可判别性时不读取该窗口的未来点，验证/测试不会泄漏。
+    # 原型只由固定训练集建立，计算可判别性时不读取该窗口的未来点，验证/测试不会泄漏。
     use_subroute_decidability = True
     subroute_decidable_min_weight = 0.05
     subroute_decidable_confidence_threshold = 0.60
@@ -305,6 +252,10 @@ class Config:
     # 前3轮逐渐把辅助流从 1/3 强度升到完整强度，先让主模型学会基本运动规律。
     balanced_intent_warmup_epochs = 3
 
+    # 辅助意图流先按轨迹归一化：一条轨迹无论产生5个还是50个重叠窗口，
+    # 每轮被抽中的总概率都大致相同，再在此基础上照顾小类。
+    use_track_balanced_intent_sampling = True
+
     # Future-enhanced 子航路意图原型。训练时用真实未来相对位移提炼“这条支路以后怎么走”，
     # 并把可判别历史拉向对应原型；验证和推理完全不读取未来，避免信息泄漏。
     # 对不可判别窗口，历史-未来对齐权重会按 decidability 自动接近0，不强迫凭空硬选。
@@ -320,9 +271,11 @@ class Config:
     # ======================================================================
     # 2. 实验输出位置
     # ======================================================================
-    # 保存模型文件时用的前缀。最终通常类似：
-    # save_models/dma_2023_06_07_08_ti_4class_K1.pt
-    model_prefix = "dma_2023_06_07_08_ti_4class_candidate_v14_tailintent_fixedsplit_qwen_semantic_compact6_hist3h_pred3h"
+    # 简短实验代号，同时用于模型文件和自动生成的结果目录。
+    # 当前含义：DMA、v15通用子航路专家、历史/预测均为3小时。
+    # 模型文件：save_models/dma_v15e_3h_fixed.pt
+    # 结果目录：results/dma_v15e_3h-年月日-时分秒/
+    model_prefix = "dma_v15e_3h"
 
     # 模型 checkpoint 保存目录。
     model_dir = "save_models"
@@ -331,7 +284,7 @@ class Config:
     results_dir = "results"
 
     # 单次运行的实验名。
-    # None：自动生成，格式大概是 模型前缀-数据集名-时间戳。
+    # None：自动生成，格式为 模型前缀-时间戳。
     # 如果想固定名字方便找结果，可以改成 "my_exp_01"。
     run_name = None
 
@@ -350,29 +303,19 @@ class Config:
     eval_only = False
 
     # eval_only=True 时加载的模型路径。
-    # None：默认加载 model_dir/model_prefix_K当前折.pt。
-    # 例如："save_models/dma_2023_06_07_08_ti_4class_K1.pt"
+    # None：默认加载 model_dir/model_prefix_fixed.pt。
+    # 例如："save_models/dma_2023_06_07_08_ti_4class_fixed.pt"
     checkpoint_path = None
 
     # ======================================================================
     # 4. 数据划分、训练轮数和数据窗口
     # ======================================================================
-    # split_mode="fixed" 时下面两项不会控制数据划分，程序只训练一次。
-    # split_mode="kfold" 时，folds是总折数，run_folds是实际运行折数。
-    folds = 5
-
-    # 实际跑几折。
-    # 1：只跑第 1 折，省时间，适合调参。
-    # 5：完整跑 5 折，更适合正式报告结果。
-    # 0：只检查配置和数据能不能读取，不训练。
-    run_folds = 1
-
     # 最大训练轮数。早停打开后，不一定会跑满。
     epochs = 50
 
     # 早停耐心值：验证集连续多少轮不提升就停。
-    # 小数据/调参可以设 3-5；正式训练可设 8-15。
-    patience = 10
+    # 当前默认采用自动调参第一组（已完成最终测试）的正式训练设置。
+    patience = 12
 
     # 早停和最佳模型保存的监控指标。
     # loss：监控验证总 loss，适合单任务训练；
@@ -381,13 +324,18 @@ class Config:
     early_stop_metric = "ade_fde"
     early_stop_fde_weight = 0.2
 
+    # 优化器与学习率调度。plateau 会在验证指标连续若干轮不改善后再降低学习率，
+    # 比旧版只比较最近3轮的触发规则更稳定。
+    learning_rate = 2e-4
+    lr_scheduler = "plateau"
+    lr_reduce_factor = 0.5
+    # 第一组最优候选：连续3轮无改善后降低学习率。
+    lr_scheduler_patience = 3
+    lr_min = 3.125e-6
+
     # 验证集占非测试数据的比例。固定测试集占20%后，剩余80%中的12.5%
     # 作为验证集，即总数据约10%。按MMSI分组后实际条数可能有轻微偏差。
     valid_ratio = 0.125
-
-    # 固定验证集条数。只有当 valid_ratio = None 时才会使用这个参数。
-    # 小样本复现实验想完全固定验证集数量时，可以设 valid_ratio = None，然后改这里。
-    valid_count = None
 
     # 滑动窗口步长。
     # 1：窗口最密，训练样本最多，但训练更慢；
@@ -403,7 +351,16 @@ class Config:
     # ======================================================================
     # 5. 测试集可视化
     # ======================================================================
-    # 每折测试结束后画多少张 “历史轨迹 / 真实未来 / 预测未来” 对比图。
+    # 是否在每个训练轮次后评估测试集。
+    # 正式实验应保持 False：训练期间只看验证集，最佳模型确定后再测试一次。
+    # True 仅用于临时诊断，不会参与反向传播、早停或最佳模型保存。
+    evaluate_test_each_epoch = False
+
+    # 普通正式训练保持 True，最佳验证模型训练完成后只测试一次。
+    # 自动调参脚本会覆盖为 False，确保搜索阶段完全不读取测试集。
+    evaluate_final_test = True
+
+    # 最终测试结束后画多少张“历史轨迹 / 真实未来 / 预测未来”对比图。
     # 0：不画图。
     plot_count = 16
 

@@ -443,13 +443,6 @@ def gate_hit_indices(track, gate):
     return np.flatnonzero(mask)
 
 
-def first_index_after(indices, threshold):
-    valid = indices[indices > threshold]
-    if len(valid) == 0:
-        return None
-    return int(valid[0])
-
-
 def recompute_track_features(track, start_ts=None, dt=None):
     track = track.copy()
     if len(track) == 0:

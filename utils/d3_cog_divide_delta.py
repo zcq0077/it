@@ -1,6 +1,4 @@
-import pandas as pd
 import numpy as np
-from matplotlib import pyplot as plt
 
 
 def cog_divide(angle_data, origin_data, ranges=8, concat=True):

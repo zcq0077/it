@@ -1,6 +1,3 @@
-import torch
-
-
 class EarlyStopping:
     def __init__(self, patience=3, verbose=False):
         self.patience = patience

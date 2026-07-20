@@ -1,0 +1,337 @@
+﻿{
+    "study_name":  "dma_v15_auto_tune",
+    "created_at":  "2026-07-19 09:57:01",
+    "base_config":  "D:\\iTentformer-master\\config_iTentformer.py",
+    "objective":  "validation_ADE + early_stop_fde_weight * validation_FDE",
+    "trials":  [
+                   {
+                       "trial_id":  "screen_01_baseline",
+                       "phase":  "screen",
+                       "params":  {
+                                      "learning_rate":  0.0002,
+                                      "lr_scheduler":  "plateau",
+                                      "lr_reduce_factor":  0.5,
+                                      "lr_scheduler_patience":  5,
+                                      "lr_min":  3.125E-06,
+                                      "subroute_residual_scale":  0.25,
+                                      "balanced_intent_loss_weight":  0.35,
+                                      "window_stride":  4,
+                                      "epochs":  16,
+                                      "train_seed":  42
+                                  },
+                       "config":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\configs\\screen_01_baseline.json",
+                       "checkpoint":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\checkpoints\\screen_01_baseline_fixed.pt",
+                       "status":  "completed",
+                       "started_at":  "2026-07-19 10:32:42",
+                       "validation":  {
+                                          "stage":  "Final Validation",
+                                          "epoch":  15,
+                                          "loss":  2.8059,
+                                          "ade":  1.87649,
+                                          "fde":  3.33932,
+                                          "rmse_cog":  15.47875,
+                                          "rmse_sog":  0.98485
+                                      },
+                       "objective":  2.5443540000000002,
+                       "returncode":  0,
+                       "finished_at":  "2026-07-19 11:39:19"
+                   },
+                   {
+                       "trial_id":  "screen_02_lr_pat3",
+                       "phase":  "screen",
+                       "params":  {
+                                      "learning_rate":  0.0002,
+                                      "lr_scheduler":  "plateau",
+                                      "lr_reduce_factor":  0.5,
+                                      "lr_scheduler_patience":  3,
+                                      "lr_min":  3.125E-06,
+                                      "subroute_residual_scale":  0.25,
+                                      "balanced_intent_loss_weight":  0.35,
+                                      "window_stride":  4,
+                                      "epochs":  16,
+                                      "train_seed":  42
+                                  },
+                       "config":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\configs\\screen_02_lr_pat3.json",
+                       "checkpoint":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\checkpoints\\screen_02_lr_pat3_fixed.pt",
+                       "status":  "completed",
+                       "started_at":  "2026-07-19 11:39:19",
+                       "validation":  {
+                                          "stage":  "Final Validation",
+                                          "epoch":  20,
+                                          "loss":  2.66281,
+                                          "ade":  1.74963,
+                                          "fde":  3.19715,
+                                          "rmse_cog":  15.17272,
+                                          "rmse_sog":  0.97639
+                                      },
+                       "objective":  2.38906,
+                       "returncode":  0,
+                       "finished_at":  "2026-07-19 13:19:31"
+                   },
+                   {
+                       "trial_id":  "screen_03_lr_pat7_floor6",
+                       "phase":  "screen",
+                       "params":  {
+                                      "learning_rate":  0.0002,
+                                      "lr_scheduler":  "plateau",
+                                      "lr_reduce_factor":  0.5,
+                                      "lr_scheduler_patience":  7,
+                                      "lr_min":  6.25E-06,
+                                      "subroute_residual_scale":  0.25,
+                                      "balanced_intent_loss_weight":  0.35,
+                                      "window_stride":  4,
+                                      "epochs":  16,
+                                      "train_seed":  42
+                                  },
+                       "config":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\configs\\screen_03_lr_pat7_floor6.json",
+                       "checkpoint":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\checkpoints\\screen_03_lr_pat7_floor6_fixed.pt",
+                       "status":  "completed",
+                       "started_at":  "2026-07-19 13:19:31",
+                       "validation":  {
+                                          "stage":  "Final Validation",
+                                          "epoch":  24,
+                                          "loss":  2.68363,
+                                          "ade":  1.81817,
+                                          "fde":  3.31343,
+                                          "rmse_cog":  15.46743,
+                                          "rmse_sog":  0.97036
+                                      },
+                       "objective":  2.480856,
+                       "returncode":  0,
+                       "finished_at":  "2026-07-19 15:00:08"
+                   },
+                   {
+                       "trial_id":  "screen_04_expert015",
+                       "phase":  "screen",
+                       "params":  {
+                                      "learning_rate":  0.0002,
+                                      "lr_scheduler":  "plateau",
+                                      "lr_reduce_factor":  0.5,
+                                      "lr_scheduler_patience":  5,
+                                      "lr_min":  3.125E-06,
+                                      "subroute_residual_scale":  0.15,
+                                      "balanced_intent_loss_weight":  0.35,
+                                      "window_stride":  4,
+                                      "epochs":  16,
+                                      "train_seed":  42
+                                  },
+                       "config":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\configs\\screen_04_expert015.json",
+                       "checkpoint":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\checkpoints\\screen_04_expert015_fixed.pt",
+                       "status":  "completed",
+                       "started_at":  "2026-07-19 15:00:08",
+                       "validation":  {
+                                          "stage":  "Final Validation",
+                                          "epoch":  24,
+                                          "loss":  2.57166,
+                                          "ade":  1.81944,
+                                          "fde":  3.31073,
+                                          "rmse_cog":  15.20193,
+                                          "rmse_sog":  0.96805
+                                      },
+                       "objective":  2.481586,
+                       "returncode":  0,
+                       "finished_at":  "2026-07-19 16:41:09"
+                   },
+                   {
+                       "trial_id":  "screen_05_expert020",
+                       "phase":  "screen",
+                       "params":  {
+                                      "learning_rate":  0.0002,
+                                      "lr_scheduler":  "plateau",
+                                      "lr_reduce_factor":  0.5,
+                                      "lr_scheduler_patience":  5,
+                                      "lr_min":  3.125E-06,
+                                      "subroute_residual_scale":  0.2,
+                                      "balanced_intent_loss_weight":  0.35,
+                                      "window_stride":  4,
+                                      "epochs":  16,
+                                      "train_seed":  42
+                                  },
+                       "config":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\configs\\screen_05_expert020.json",
+                       "checkpoint":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\checkpoints\\screen_05_expert020_fixed.pt",
+                       "status":  "completed",
+                       "started_at":  "2026-07-19 16:41:09",
+                       "validation":  {
+                                          "stage":  "Final Validation",
+                                          "epoch":  24,
+                                          "loss":  2.5956,
+                                          "ade":  1.782,
+                                          "fde":  3.19484,
+                                          "rmse_cog":  15.00872,
+                                          "rmse_sog":  0.97219
+                                      },
+                       "objective":  2.4209680000000002,
+                       "returncode":  0,
+                       "finished_at":  "2026-07-19 18:22:27"
+                   },
+                   {
+                       "trial_id":  "screen_06_balance020",
+                       "phase":  "screen",
+                       "params":  {
+                                      "learning_rate":  0.0002,
+                                      "lr_scheduler":  "plateau",
+                                      "lr_reduce_factor":  0.5,
+                                      "lr_scheduler_patience":  5,
+                                      "lr_min":  3.125E-06,
+                                      "subroute_residual_scale":  0.25,
+                                      "balanced_intent_loss_weight":  0.2,
+                                      "window_stride":  4,
+                                      "epochs":  16,
+                                      "train_seed":  42
+                                  },
+                       "config":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\configs\\screen_06_balance020.json",
+                       "checkpoint":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\checkpoints\\screen_06_balance020_fixed.pt",
+                       "status":  "completed",
+                       "started_at":  "2026-07-19 18:22:27",
+                       "validation":  {
+                                          "stage":  "Final Validation",
+                                          "epoch":  24,
+                                          "loss":  2.62833,
+                                          "ade":  1.78584,
+                                          "fde":  3.20782,
+                                          "rmse_cog":  15.07444,
+                                          "rmse_sog":  0.96659
+                                      },
+                       "objective":  2.427404,
+                       "returncode":  0,
+                       "finished_at":  "2026-07-19 20:03:23"
+                   },
+                   {
+                       "trial_id":  "screen_07_balance025",
+                       "phase":  "screen",
+                       "params":  {
+                                      "learning_rate":  0.0002,
+                                      "lr_scheduler":  "plateau",
+                                      "lr_reduce_factor":  0.5,
+                                      "lr_scheduler_patience":  5,
+                                      "lr_min":  3.125E-06,
+                                      "subroute_residual_scale":  0.25,
+                                      "balanced_intent_loss_weight":  0.25,
+                                      "window_stride":  4,
+                                      "epochs":  16,
+                                      "train_seed":  42
+                                  },
+                       "config":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\configs\\screen_07_balance025.json",
+                       "checkpoint":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\checkpoints\\screen_07_balance025_fixed.pt",
+                       "status":  "completed",
+                       "started_at":  "2026-07-19 20:03:23",
+                       "validation":  {
+                                          "stage":  "Final Validation",
+                                          "epoch":  24,
+                                          "loss":  2.65191,
+                                          "ade":  1.78872,
+                                          "fde":  3.21676,
+                                          "rmse_cog":  15.02273,
+                                          "rmse_sog":  0.96827
+                                      },
+                       "objective":  2.4320720000000002,
+                       "returncode":  0,
+                       "finished_at":  "2026-07-19 21:45:13"
+                   },
+                   {
+                       "trial_id":  "screen_08_expert020_balance025",
+                       "phase":  "screen",
+                       "params":  {
+                                      "learning_rate":  0.0002,
+                                      "lr_scheduler":  "plateau",
+                                      "lr_reduce_factor":  0.5,
+                                      "lr_scheduler_patience":  5,
+                                      "lr_min":  3.125E-06,
+                                      "subroute_residual_scale":  0.2,
+                                      "balanced_intent_loss_weight":  0.25,
+                                      "window_stride":  4,
+                                      "epochs":  16,
+                                      "train_seed":  42
+                                  },
+                       "config":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\configs\\screen_08_expert020_balance025.json",
+                       "checkpoint":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\checkpoints\\screen_08_expert020_balance025_fixed.pt",
+                       "status":  "completed",
+                       "started_at":  "2026-07-19 21:45:13",
+                       "validation":  {
+                                          "stage":  "Final Validation",
+                                          "epoch":  24,
+                                          "loss":  2.59763,
+                                          "ade":  1.82975,
+                                          "fde":  3.32144,
+                                          "rmse_cog":  15.29144,
+                                          "rmse_sog":  0.9777
+                                      },
+                       "objective":  2.4940379999999998,
+                       "returncode":  0,
+                       "finished_at":  "2026-07-19 23:27:01"
+                   },
+                   {
+                       "trial_id":  "final_01_screen_02_lr_pat3",
+                       "phase":  "final",
+                       "params":  {
+                                      "learning_rate":  0.0002,
+                                      "lr_scheduler":  "plateau",
+                                      "lr_reduce_factor":  0.5,
+                                      "lr_scheduler_patience":  3,
+                                      "lr_min":  3.125E-06,
+                                      "subroute_residual_scale":  0.25,
+                                      "balanced_intent_loss_weight":  0.35,
+                                      "window_stride":  1,
+                                      "epochs":  50,
+                                      "train_seed":  42
+                                  },
+                       "config":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\configs\\final_01_screen_02_lr_pat3.json",
+                       "checkpoint":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\checkpoints\\final_01_screen_02_lr_pat3_fixed.pt",
+                       "status":  "completed",
+                       "started_at":  "2026-07-19 23:27:01",
+                       "validation":  {
+                                          "stage":  "Final Validation",
+                                          "epoch":  36,
+                                          "loss":  2.46849,
+                                          "ade":  1.5655,
+                                          "fde":  2.989,
+                                          "rmse_cog":  12.6129,
+                                          "rmse_sog":  0.84711
+                                      },
+                       "objective":  2.1633,
+                       "returncode":  0,
+                       "finished_at":  "2026-07-20 12:40:45"
+                   },
+                   {
+                       "trial_id":  "final_02_screen_05_expert020",
+                       "phase":  "final",
+                       "params":  {
+                                      "learning_rate":  0.0002,
+                                      "lr_scheduler":  "plateau",
+                                      "lr_reduce_factor":  0.5,
+                                      "lr_scheduler_patience":  5,
+                                      "lr_min":  3.125E-06,
+                                      "subroute_residual_scale":  0.2,
+                                      "balanced_intent_loss_weight":  0.35,
+                                      "window_stride":  1,
+                                      "epochs":  50,
+                                      "train_seed":  42
+                                  },
+                       "config":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\configs\\final_02_screen_05_expert020.json",
+                       "checkpoint":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\checkpoints\\final_02_screen_05_expert020_fixed.pt",
+                       "status":  "cancelled_by_user",
+                       "started_at":  "2026-07-20 12:40:46",
+                       "validation":  null,
+                       "objective":  null,
+                       "finished_at":  "2026-07-20 19:10:25"
+                   }
+               ],
+    "updated_at":  "2026-07-20 19:14:30",
+    "status":  "stopped_by_user_after_first_final",
+    "winner_trial_id":  "final_01_screen_02_lr_pat3",
+    "winner_checkpoint":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\checkpoints\\final_01_screen_02_lr_pat3_fixed.pt",
+    "final_test":  {
+                       "returncode":  0,
+                       "selection":  "first_full_finalist_selected_after_user_stopped_search",
+                       "log":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\runs\\first_group_early_test\\train.log",
+                       "plots":  "D:\\iTentformer-master\\tuning_results\\dma_v15_auto_tune\\runs\\first_group_early_test\\plots",
+                       "metric":  {
+                                      "epoch":  0,
+                                      "loss":  2.92568,
+                                      "ade":  1.52731,
+                                      "fde":  2.94715,
+                                      "rmse_cog":  12.00879,
+                                      "rmse_sog":  0.89075
+                                  }
+                   }
+}

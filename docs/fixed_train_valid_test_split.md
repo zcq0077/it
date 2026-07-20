@@ -14,7 +14,6 @@
 关键配置：
 
 ```python
-split_mode = "fixed"
 test_ratio = 0.20
 valid_ratio = 0.125  # 剩余80%中的12.5%，相当于总数据的10%
 split_seed = 42
@@ -31,15 +30,6 @@ split_manifest_path = "dataset/dma_raw_2023_06_07_08/dma_fixed_split_70_10_20_se
 python iTentformer.py
 ```
 
-固定模式的模型保存名以 `_fixed.pt` 结尾。日志内部仍会显示 `1/1`，它只表示唯一一次训练流程，不代表交叉验证折数。
+模型保存名以 `_fixed.pt` 结尾。当前主程序只保留这一套固定划分流程，不再包含 K 折参数和分支。
 
-需要恢复五折交叉验证时：
-
-```python
-split_mode = "kfold"
-folds = 5
-run_folds = 5
-valid_ratio = 0.10
-```
-
-固定划分的单次结果可以作为标准 train/valid/test 实验，但不是五折平均结果。比较不同模型时必须共用同一个划分清单。
+固定划分的单次结果可以作为标准 train/valid/test 实验。比较不同模型时必须共用同一个划分清单。

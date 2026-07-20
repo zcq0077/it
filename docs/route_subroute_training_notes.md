@@ -317,7 +317,7 @@ balanced_sampling_mix_ratio = 0.4
 
 这样做比完全均衡采样更稳。完全均衡可能损害大类主航路表现，而当前混合采样能兼顾小类和整体分布。
 
-### 6.3 子航路分层 K 折
+### 6.3 固定划分中的子航路比例约束
 
 配置：
 
@@ -327,9 +327,9 @@ stratify_by_subroute = True
 
 作用：
 
-- K 折划分时按子航路分层。
-- 尽量保证每一折训练集和测试集里都有各个子航路。
-- 避免某一折刚好缺少小分支，导致验证或测试结果不稳定。
+- 固定划分时把子航路比例作为候选划分的质量指标。
+- 尽量保证训练、验证和测试集里都有各个子航路。
+- 全程按 MMSI 分组，避免同一艘船跨集合造成数据泄漏。
 
 ## 7. 日志中如何观察小分支效果
 
@@ -502,46 +502,10 @@ candidate_switch_logit_margin = 0.15
 
 日志中的 `Candidate_Selector` 会报告优胜者选择准确率、Top-2 主航路召回率、Top-4 子航路召回率、实际切换比例和理论 Oracle@5 指标。
 
-### 8.5 Qwen3-1.7B 候选重排
+### 8.5 Qwen3-1.7B 离线语义教师
 
-本地千问不是用自然语言直接生成经纬度，而是作为第二阶段候选比较器：
-
-1. 主 iTentformer 按正常流程训练并加载验证集最优 checkpoint。
-2. 从训练集抽取候选筛选器选错、基础轨迹不是最优、分类置信度不足的困难窗口。
-3. 将 10 个历史点映射为数值 soft token，将每条候选的类别概率、运动连续性、原型距离、相对轨迹形态映射为候选 token。
-4. 冻结 Qwen3-1.7B 全部骨干参数，只训练数值适配器和打分头。
-5. 推理时仅对不确定窗口融合 Qwen 分数，最后仍由保守门控输出唯一一条轨迹。
-
-默认配置：
-
-```python
-use_qwen_reranker = True
-qwen_model_path = r"D:\Jason1982\wsl\Models\Qwen3-1.7B"
-qwen_reranker_epochs = 3
-qwen_train_max_windows = 4096
-qwen_valid_max_windows = 1024
-qwen_hard_sample_ratio = 0.7
-qwen_reranker_weight = 0.5
-qwen_cost_temperature = 0.25
-qwen_cost_regression_weight = 0.2
-qwen_calibration_max_apply_ratio = 0.35
-qwen_uncertain_only = True
-qwen_require_validation_gain = True
-qwen_min_validation_gain = 0.5
-qwen_min_validation_cost_gain = 0.005
-```
-
-千问原始权重不会复制进 iTentformer checkpoint。每折只额外保存一个轻量适配器：
-
-```text
-save_models/<model_prefix>_K1_qwen_reranker.pt
-```
-
-当前默认适配器约有 41 万个可训练参数。训练完成后，融合选择准确率必须在验证集至少提升 `0.5` 个百分点，并且验证集真实 `ADE + candidate_fde_weight * FDE` 不能变差，才会在正式测试启用；否则自动退回原筛选器，避免负优化。日志会分别报告 `qwen_applied`、`qwen_winner_acc`、候选轨迹代价和融合后的 `selector_winner_acc`。关闭千问做消融实验：
-
-```powershell
-python iTentformer.py --no-use_qwen_reranker
-```
+验证不稳定的训练后候选重排器已经从代码中移除。当前 Qwen 只离线编码预测时可见的
+Destination、船型、尺寸、吃水、ETA 和航行状态；训练阶段读取冻结语义侧车，通过轻量门控模块辅助主航路头、子航路头和候选选择器。完整生成命令与消融方法见 `docs/qwen_semantic_teacher.md`。
 
 ## 9. 复现实验命令
 
@@ -551,22 +515,16 @@ python iTentformer.py --no-use_qwen_reranker
 python iTentformer.py
 ```
 
-只跑一折调参：
-
-```powershell
-python iTentformer.py --run_folds 1
-```
-
 冒烟测试：
 
 ```powershell
 .\run_smoke_test.ps1
 ```
 
-默认冒烟测试关闭千问以保持速度；需要连同千问二阶段一起检查时运行：
+只检查配置、数据和固定划分而不训练：
 
 ```powershell
-.\run_smoke_test.ps1 -WithQwen -WindowStride 100
+.\run_smoke_test.ps1 -SplitOnly
 ```
 
 冒烟测试输出固定在：
@@ -613,12 +571,11 @@ python utils\build_dma_voyage_context.py `
 
 ```python
 voyage_context_path = "dataset/dma_raw_2023_06_07_08/dma_voyage_context_2023_06_07_08.pkl"
-group_folds_by_mmsi = True
-qwen_context_max_tokens = 64
-qwen_context_dropout = 0.15
+use_qwen_semantic_teacher = True
+qwen_semantic_path = "dataset/dma_raw_2023_06_07_08/dma_qwen_semantic_teacher_v1.pkl"
 ```
 
-Qwen会读取航次语义文本、10点历史运动、11项航路几何特征和全部5条候选，再输出候选排序分数。训练时随机遮蔽15%的语义上下文，防止模型过度依赖错误或缺失的Destination。MMSI本身不会输入模型，只用于防泄漏分组。
+Qwen只离线读取航次语义文本并生成冻结向量；主模型结合历史运动和航路几何完成分类、候选生成与轨迹预测。训练时随机遮蔽一部分语义特征，防止模型过度依赖错误或缺失的Destination。MMSI本身不会输入模型，只用于固定划分的防泄漏分组。
 
 建议使用同一套MMSI分组运行消融实验：
 
@@ -626,13 +583,13 @@ Qwen会读取航次语义文本、10点历史运动、11项航路几何特征和
 # 纯运动/航路几何基线
 python iTentformer.py --voyage_context_path none --model_prefix grouped_motion_baseline
 
-# 加入AIS航次语义与Qwen联合重排
+# 加入AIS航次语义教师
 python iTentformer.py `
   --voyage_context_path dataset\dma_raw_2023_06_07_08\dma_voyage_context_2023_06_07_08.pkl `
   --model_prefix grouped_voyage_semantic_qwen
 ```
 
-两组都保持 `group_folds_by_mmsi=True`，否则同一船舶跨训练/测试会使语义实验结果虚高。
+两组都会使用同一份固定 MMSI 分组清单，保证消融比较公平。
 
 ## 12. 需要注意的限制
 
@@ -640,7 +597,7 @@ python iTentformer.py `
 2. 分支发生前的历史窗口本身可能具有不确定性，此时模型难以准确判断最终子航路是正常现象。
 3. 子航路数量越多，小类样本越少，分类和预测都会变难。
 4. 当前策略是提高小分支参与度，而不是强行让模型一定预测小分支。
-5. 正式比较实验效果时，应固定数据集、折数、随机种子，并比较同一折的 ADE/FDE、子航路准确率和可视化结果。
+5. 正式比较实验效果时，应固定数据集、划分清单和随机种子，并比较同一测试集的 ADE/FDE、子航路准确率和可视化结果。
 
 ## 13. 分叉前未决、分叉后确定的分阶段监督
 
@@ -698,27 +655,9 @@ hierarchy_min_scale = 0.15
 
 调参时优先观察 `hard_top1_acc` 是否上升和 `ECE` 是否下降，不以硬选覆盖率越高越好。门控过严会降低覆盖率但通常保护 ADE；门控过松会重新出现错误分支被高置信度注入生成器的问题。
 
-## 15. Qwen 子航路反事实反推
+## 15. 全子航路候选池
 
-当前版本不让 Qwen 直接生成经纬度，而是把它作为候选子航路的反事实验证器。对于每条候选，系统提出问题：“如果未来确实走这条子航路，那么沿该航路原型倒着追溯，能否解释已经观测到的完整历史？”
-
-首先使用 `candidate_pool_strategy="all_subroutes"`。紧凑版只有 6 个子航路，因此全部进入候选池并自动绑定所属主航路，避免真实小分支因先验概率低而在 Qwen 评分前就被删掉。
-
-每条候选新增 16 项反推证据：完整及最近历史到中心线的距离、横向接近趋势、沿航路进度及单调性、历史速度与局部切线的一致性、候选初始速度反向外推后的历史重构误差、速度与转向连续性，以及同一主航路下兄弟子路之间的历史匹配差。所有证据只使用预测时已经存在的历史、训练集航路原型和候选未来，不读取真实未来。
-
-训练阶段仍用真实未来的候选 ADE/FDE 确定监督排序，同时增加成对排序损失。主选择器在同一主航路内选错子路的样本会被额外加权，使 Qwen 重点学习 `OA_S00/OA_S01/OA_S02` 这种难分支，而不是只学习容易区分的 OA 与 OC。
-
-```python
-candidate_pool_strategy = "all_subroutes"
-candidate_max_subroutes = 8
-
-qwen_pairwise_weight = 0.4
-qwen_pairwise_margin = 0.3
-qwen_pairwise_min_cost_gap = 0.01
-qwen_same_route_hard_weight = 1.5
-```
-
-推理时真实未来不会输入 Qwen。Qwen 分数仍需通过独立验证集校准；只有融合后的候选胜者准确率和轨迹代价达到增益要求，最终测试才启用。若共享主干上的历史对所有子路反推结果都相同，Qwen 应保持不确定，而不能凭空确定未来分支。
+当前紧凑版只有 6 个子航路，因此 `candidate_pool_strategy="all_subroutes"` 会让全部小分支进入候选池并自动绑定所属主航路，避免低先验小类在评分前就被删除。候选由主模型的学习式选择器结合历史表示、类别概率、航路原型和候选轨迹连续性进行排序；Qwen 离线语义向量只作为额外上下文，不单独反推或决定最终航路。
 
 ## 16. 小类解耦双流训练
 

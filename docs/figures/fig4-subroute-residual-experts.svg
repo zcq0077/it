@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2180" height="1080" viewBox="0 0 2180 1080" role="img" aria-labelledby="title desc">
+  <title id="title">通用子航路残差专家模块</title>
+  <desc id="desc">运动基线、共享轨迹残差与子航路专家残差沿三条平行通道计算，最后通过统一求和节点合成预测。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,4 L0,8 z" fill="#4B5563"/>
+    </marker>
+    <marker id="arrowTrain" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,4 L0,8 z" fill="#7556A8"/>
+    </marker>
+    <style>
+      text { font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", Arial, sans-serif; fill: #20262E; letter-spacing: 0; }
+      .figure-title { font-size: 34px; font-weight: 500; }
+      .group-title { font-size: 23px; font-weight: 500; }
+      .box-title { font-size: 21px; font-weight: 500; }
+      .body { font-size: 17px; font-weight: 400; }
+      .small { font-size: 15px; font-weight: 400; fill: #5C6672; }
+      .formula { font-size: 19px; font-weight: 500; }
+      .step { font-size: 17px; font-weight: 500; }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="2180" height="1080" fill="#FFFFFF"/>
+  <text x="1090" y="52" text-anchor="middle" class="figure-title">通用子航路残差专家模块</text>
+<rect x="720" y="72" width="22" height="15" rx="2" fill="#EAF2FB" stroke="#4A79A8" stroke-width="1.5"/><text x="751" y="85" text-anchor="start" class="small"><tspan x="751" dy="0">原始主干</tspan></text>
+<rect x="865" y="72" width="22" height="15" rx="2" fill="#ECF5EF" stroke="#3D7D55" stroke-width="1.5"/><text x="896" y="85" text-anchor="start" class="small"><tspan x="896" dy="0">本文新增</tspan></text>
+<rect x="1010" y="72" width="22" height="15" rx="2" fill="#FFF7E6" stroke="#9B6A20" stroke-width="1.5"/><text x="1041" y="85" text-anchor="start" class="small"><tspan x="1041" dy="0">语义/几何先验</tspan></text>
+<rect x="1180" y="72" width="22" height="15" rx="2" fill="#F4F0FA" stroke="#7556A8" stroke-width="1.5" stroke-dasharray="4 3"/><text x="1211" y="85" text-anchor="start" class="small"><tspan x="1211" dy="0">仅训练阶段</tspan></text>
+<text x="60" y="155" text-anchor="start" class="group-title"><tspan x="60" dy="0">并行残差通道</tspan></text>
+<polyline points="50,175 2100,175" fill="none" stroke="#A7B0BA" stroke-width="1.5" stroke-linejoin="round"/><rect x="60" y="225" width="280" height="140" rx="5" fill="#F7F8FA" stroke="#65707C" stroke-width="2"/><text x="200" y="260" text-anchor="middle" class="box-title"><tspan x="200" dy="0">历史状态 X</tspan></text>
+<text x="200" y="293" text-anchor="middle" class="body"><tspan x="200" dy="0">最后位置与速度趋势</tspan><tspan x="200" dy="26">未来 12 步</tspan></text>
+<rect x="430" y="225" width="380" height="140" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="620" y="260" text-anchor="middle" class="box-title"><tspan x="620" dy="0">运动基线 B(X)</tspan></text>
+<text x="620" y="293" text-anchor="middle" class="body"><tspan x="620" dy="0">残差式线性外推</tspan><tspan x="620" dy="26">保持位置与速度连续</tspan></text>
+<rect x="60" y="465" width="280" height="140" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="200" y="500" text-anchor="middle" class="box-title"><tspan x="200" dy="0">运动表征 H</tspan></text>
+<text x="200" y="533" text-anchor="middle" class="body"><tspan x="200" dy="0">TCN 局部时序编码</tspan><tspan x="200" dy="24">+ Transformer 全局编码</tspan><tspan x="200" dy="24">共享历史特征</tspan></text>
+<rect x="430" y="465" width="380" height="140" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="620" y="500" text-anchor="middle" class="box-title"><tspan x="620" dy="0">共享残差 Rshared</tspan></text>
+<text x="620" y="533" text-anchor="middle" class="body"><tspan x="620" dy="0">注意力融合 + 轨迹解码器</tspan><tspan x="620" dy="26">学习跨航路共性运动</tspan></text>
+<rect x="60" y="705" width="280" height="140" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="200" y="740" text-anchor="middle" class="box-title"><tspan x="200" dy="0">子航路条件</tspan></text>
+<text x="200" y="773" text-anchor="middle" class="body"><tspan x="200" dy="0">子航路概率或类别编号</tspan><tspan x="200" dy="26">主/子航路嵌入向量</tspan></text>
+<rect x="430" y="705" width="270" height="140" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="565" y="740" text-anchor="middle" class="box-title"><tspan x="565" dy="0">停止梯度</tspan></text>
+<text x="565" y="773" text-anchor="middle" class="body"><tspan x="565" dy="0">阻断专家私有梯度</tspan><tspan x="565" dy="26">保护共享表示</tspan></text>
+<rect x="785" y="665" width="760" height="220" rx="6" fill="#FFFFFF" stroke="#3D7D55" stroke-width="2.2"/>
+  <rect x="801" y="648" width="226" height="34" rx="4" fill="#FFFFFF" stroke="#3D7D55" stroke-width="1.8"/>
+  <text x="914" y="672" text-anchor="middle" class="group-title">子航路残差专家库</text>
+<rect x="820" y="710" width="200" height="55" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="920" y="739" text-anchor="middle" class="box-title"><tspan x="920" dy="0">OA_S00</tspan></text>
+<rect x="1055" y="710" width="200" height="55" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1155" y="739" text-anchor="middle" class="box-title"><tspan x="1155" dy="0">OA_S01</tspan></text>
+<rect x="1290" y="710" width="200" height="55" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1390" y="739" text-anchor="middle" class="box-title"><tspan x="1390" dy="0">OA_S02</tspan></text>
+<rect x="820" y="790" width="200" height="55" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="920" y="819" text-anchor="middle" class="box-title"><tspan x="920" dy="0">OB1_S00</tspan></text>
+<rect x="1055" y="790" width="200" height="55" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1155" y="819" text-anchor="middle" class="box-title"><tspan x="1155" dy="0">OB2_S00</tspan></text>
+<rect x="1290" y="790" width="200" height="55" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1390" y="819" text-anchor="middle" class="box-title"><tspan x="1390" dy="0">OC_S00</tspan></text>
+<text x="1165" y="872" text-anchor="middle" class="small"><tspan x="1165" dy="0">每个专家：层归一化 LN → 多层感知机 MLP → 子航路修正 ΔYk；末层零初始化</tspan></text>
+<rect x="1625" y="680" width="280" height="175" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1765" y="715" text-anchor="middle" class="box-title"><tspan x="1765" dy="0">专家路由</tspan></text>
+<text x="1765" y="748" text-anchor="middle" class="body"><tspan x="1765" dy="0">普通前向：按子航路概率软加权</tspan><tspan x="1765" dy="26">候选前向：选第 k 个类别专家</tspan><tspan x="1765" dy="26">统一乘缩放系数 0.25</tspan></text>
+<polyline points="340,295 430,295" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="340,535 430,535" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="340,775 430,775" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="700,775 785,775" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="1545,775 1625,775" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="810,295 1970,295" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round"/><polyline points="810,535 1970,535" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round"/><polyline points="1905,775 1970,775" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round"/><polyline points="1970,295 1970,775" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round"/><rect x="1966" y="291" width="8" height="8" fill="#65707C"/><rect x="1966" y="531" width="8" height="8" fill="#65707C"/><rect x="1966" y="771" width="8" height="8" fill="#65707C"/><rect x="2015" y="430" width="120" height="210" rx="5" fill="#F7F8FA" stroke="#65707C" stroke-width="2"/><text x="2075" y="465" text-anchor="middle" class="box-title"><tspan x="2075" dy="0">求和</tspan></text>
+<text x="2075" y="498" text-anchor="middle" class="body"><tspan x="2075" dy="0">Ŷ =</tspan><tspan x="2075" dy="30">B(X)</tspan><tspan x="2075" dy="30">+ Rshared</tspan><tspan x="2075" dy="30">+ Rsub</tspan></text>
+<polyline points="1970,535 2015,535" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="430" y="950" width="1475" height="70" rx="5" fill="#F7F8FA" stroke="#65707C" stroke-width="2"/><text x="1167.5" y="979" text-anchor="middle" class="box-title"><tspan x="1167.5" dy="0">设计原则</tspan></text>
+<text x="1167.5" y="1005" text-anchor="middle" class="body"><tspan x="1167.5" dy="0">共享主干学习通用运动；每个专家只负责小幅、可控、与数据来源无关的子航路修正。</tspan></text>
+</svg>

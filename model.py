@@ -1,13 +1,8 @@
-import math
-import sys
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torch.optim as optim
 from torch.nn.utils import weight_norm
 from torch.nn.init import kaiming_normal_
-from scipy.stats import multivariate_normal
 
 
 class SELayer(nn.Module):
@@ -267,6 +262,67 @@ class TrajModel(nn.Module):
         return out, attn_weights
 
 
+class SubrouteResidualExpertBank(nn.Module):
+    """Small per-subroute corrections on top of the shared trajectory decoder."""
+
+    def __init__(
+            self,
+            feature_dim,
+            hidden_dim,
+            class_count,
+            target_length,
+            output_dim,
+            dropout,
+            scale,
+    ):
+        super().__init__()
+        self.class_count = int(class_count)
+        self.target_length = int(target_length)
+        self.output_dim = int(output_dim)
+        self.scale = float(scale)
+        self.experts = nn.ModuleList()
+        for _ in range(self.class_count):
+            output_layer = nn.Linear(
+                hidden_dim,
+                self.target_length * self.output_dim,
+            )
+            nn.init.zeros_(output_layer.weight)
+            nn.init.zeros_(output_layer.bias)
+            self.experts.append(nn.Sequential(
+                nn.LayerNorm(feature_dim),
+                nn.Linear(feature_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                output_layer,
+            ))
+
+    def forward(self, feature, probabilities=None, class_ids=None):
+        if (probabilities is None) == (class_ids is None):
+            raise ValueError("Provide either subroute probabilities or class ids.")
+
+        # The expert learns a branch correction without pushing its private loss
+        # back into the shared history representation.
+        feature = feature.detach()
+        expert_outputs = torch.stack(
+            [expert(feature) for expert in self.experts],
+            dim=1,
+        ).reshape(
+            feature.size(0),
+            self.class_count,
+            self.target_length,
+            self.output_dim,
+        )
+        if class_ids is not None:
+            batch_index = torch.arange(feature.size(0), device=feature.device)
+            correction = expert_outputs[batch_index, class_ids.long()]
+        else:
+            correction = torch.sum(
+                probabilities[:, :, None, None] * expert_outputs,
+                dim=1,
+            )
+        return self.scale * correction
+
+
 class iTentformer(nn.Module):
 
     def __init__(self, input_size_tcn, input_size, local_intent_size, output_size, concat_dim, input_length,
@@ -294,7 +350,11 @@ class iTentformer(nn.Module):
                  semantic_hidden_dim=128, semantic_fusion_weight=0.25,
                  semantic_dropout=0.15,
                  use_future_enhanced_intent=False, future_intent_dim=64,
-                 future_intent_temperature=0.2, future_intent_logit_weight=0.15):
+                 future_intent_temperature=0.2, future_intent_logit_weight=0.15,
+                 use_subroute_residual_experts=False,
+                 subroute_residual_hidden_dim=32,
+                 subroute_residual_scale=0.25,
+                 subroute_residual_dropout=0.10):
         super().__init__()
         self.target_length = int(target_length)
         self.TCN = TCN(input_size_tcn, local_intent_size, num_channels, kernel_size, dropout=dropout)
@@ -367,6 +427,11 @@ class iTentformer(nn.Module):
         self.future_intent_dim = int(future_intent_dim)
         self.future_intent_temperature = float(future_intent_temperature)
         self.future_intent_logit_weight = float(future_intent_logit_weight)
+        self.use_subroute_residual_experts = bool(
+            use_subroute_residual_experts
+            and self.use_subroute_embedding
+            and subroute_classes > 0
+        )
 
         if route_prototypes is not None:
             self.register_buffer("route_prototypes", route_prototypes.float())
@@ -477,6 +542,17 @@ class iTentformer(nn.Module):
                 nn.ReLU(),
                 nn.Dropout(dropout),
                 nn.Linear(candidate_selector_hidden_dim, 1),
+            )
+
+        if getattr(self, "use_subroute_residual_experts", False):
+            self.subroute_residual_expert_bank = SubrouteResidualExpertBank(
+                feature_dim=feature_dim,
+                hidden_dim=subroute_residual_hidden_dim,
+                class_count=subroute_classes,
+                target_length=target_length,
+                output_dim=output_size,
+                dropout=subroute_residual_dropout,
+                scale=subroute_residual_scale,
             )
 
         if route_to_subroute_mask is not None:
@@ -721,6 +797,12 @@ class iTentformer(nn.Module):
             -1, candidate_count, -1, -1
         ).reshape(batch_size * candidate_count, src.size(1), src.size(2))
         raw_output, _ = self.TrajModel(expanded_src.transpose(1, 2), candidate_intent)
+        if getattr(self, "use_subroute_residual_experts", False):
+            candidate_feature = self._intent_feature(candidate_intent)
+            raw_output = raw_output + self.subroute_residual_expert_bank(
+                candidate_feature,
+                class_ids=candidate_subroute_ids.reshape(-1),
+            )
         return raw_output.reshape(
             batch_size,
             candidate_count,
@@ -858,6 +940,7 @@ class iTentformer(nn.Module):
         subroute_logits = None
         subroute_feature = None
         subroute_decidability_logits = None
+        subroute_prob = None
         intent_feature = self._intent_feature(intent)
         intent_feature, semantic_latent = self._fuse_semantic_feature(
             intent_feature,
@@ -958,6 +1041,11 @@ class iTentformer(nn.Module):
             )
 
         out, _ = self.TrajModel(src.transpose(1, 2), intent)
+        if getattr(self, "use_subroute_residual_experts", False):
+            out = out + self.subroute_residual_expert_bank(
+                self._intent_feature(intent),
+                probabilities=subroute_prob,
+            )
         out_intent = self.TCN.linear_intent(intent)
         if out_intent.size(1) != self.target_length:
             out_intent = F.interpolate(
