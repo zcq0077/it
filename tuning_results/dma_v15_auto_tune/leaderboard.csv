@@ -1,0 +1,10 @@
+﻿rank,trial_id,phase,objective,ade_nmi,fde_nmi,best_epoch,learning_rate,lr_scheduler_patience,lr_min,subroute_residual_scale,balanced_intent_loss_weight,window_stride,epochs,checkpoint
+1,final_01_screen_02_lr_pat3,final,2.163300,1.565500,2.989000,36,0.0002,3,3.125e-06,0.25,0.35,1,50,D:\iTentformer-master\tuning_results\dma_v15_auto_tune\checkpoints\final_01_screen_02_lr_pat3_fixed.pt
+2,screen_02_lr_pat3,screen,2.389060,1.749630,3.197150,20,0.0002,3,3.125e-06,0.25,0.35,4,16,D:\iTentformer-master\tuning_results\dma_v15_auto_tune\checkpoints\screen_02_lr_pat3_fixed.pt
+3,screen_05_expert020,screen,2.420968,1.782000,3.194840,24,0.0002,5,3.125e-06,0.2,0.35,4,16,D:\iTentformer-master\tuning_results\dma_v15_auto_tune\checkpoints\screen_05_expert020_fixed.pt
+4,screen_06_balance020,screen,2.427404,1.785840,3.207820,24,0.0002,5,3.125e-06,0.25,0.2,4,16,D:\iTentformer-master\tuning_results\dma_v15_auto_tune\checkpoints\screen_06_balance020_fixed.pt
+5,screen_07_balance025,screen,2.432072,1.788720,3.216760,24,0.0002,5,3.125e-06,0.25,0.25,4,16,D:\iTentformer-master\tuning_results\dma_v15_auto_tune\checkpoints\screen_07_balance025_fixed.pt
+6,screen_03_lr_pat7_floor6,screen,2.480856,1.818170,3.313430,24,0.0002,7,6.25e-06,0.25,0.35,4,16,D:\iTentformer-master\tuning_results\dma_v15_auto_tune\checkpoints\screen_03_lr_pat7_floor6_fixed.pt
+7,screen_04_expert015,screen,2.481586,1.819440,3.310730,24,0.0002,5,3.125e-06,0.15,0.35,4,16,D:\iTentformer-master\tuning_results\dma_v15_auto_tune\checkpoints\screen_04_expert015_fixed.pt
+8,screen_08_expert020_balance025,screen,2.494038,1.829750,3.321440,24,0.0002,5,3.125e-06,0.2,0.25,4,16,D:\iTentformer-master\tuning_results\dma_v15_auto_tune\checkpoints\screen_08_expert020_balance025_fixed.pt
+9,screen_01_baseline,screen,2.544354,1.876490,3.339320,15,0.0002,5,3.125e-06,0.25,0.35,4,16,D:\iTentformer-master\tuning_results\dma_v15_auto_tune\checkpoints\screen_01_baseline_fixed.pt

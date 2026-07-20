@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1120" viewBox="0 0 2200 1120" role="img" aria-labelledby="title desc">
+  <title id="title">层级航路意图与可判别性模块</title>
+  <desc id="desc">运动历史、千问语义与航路中心线先验形成主航路和子航路概率，并通过可判别性门控决定唯一选择或保留前两类软分布。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,4 L0,8 z" fill="#4B5563"/>
+    </marker>
+    <marker id="arrowTrain" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,4 L0,8 z" fill="#7556A8"/>
+    </marker>
+    <style>
+      text { font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", Arial, sans-serif; fill: #20262E; letter-spacing: 0; }
+      .figure-title { font-size: 34px; font-weight: 500; }
+      .group-title { font-size: 23px; font-weight: 500; }
+      .box-title { font-size: 21px; font-weight: 500; }
+      .body { font-size: 17px; font-weight: 400; }
+      .small { font-size: 15px; font-weight: 400; fill: #5C6672; }
+      .formula { font-size: 19px; font-weight: 500; }
+      .step { font-size: 17px; font-weight: 500; }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="2200" height="1120" fill="#FFFFFF"/>
+  <text x="1100" y="52" text-anchor="middle" class="figure-title">层级航路意图与可判别性模块</text>
+<rect x="700" y="72" width="22" height="15" rx="2" fill="#EAF2FB" stroke="#4A79A8" stroke-width="1.5"/><text x="731" y="85" text-anchor="start" class="small"><tspan x="731" dy="0">原始主干</tspan></text>
+<rect x="845" y="72" width="22" height="15" rx="2" fill="#ECF5EF" stroke="#3D7D55" stroke-width="1.5"/><text x="876" y="85" text-anchor="start" class="small"><tspan x="876" dy="0">本文新增</tspan></text>
+<rect x="990" y="72" width="22" height="15" rx="2" fill="#FFF7E6" stroke="#9B6A20" stroke-width="1.5"/><text x="1021" y="85" text-anchor="start" class="small"><tspan x="1021" dy="0">语义/几何先验</tspan></text>
+<rect x="1160" y="72" width="22" height="15" rx="2" fill="#F4F0FA" stroke="#7556A8" stroke-width="1.5" stroke-dasharray="4 3"/><text x="1191" y="85" text-anchor="start" class="small"><tspan x="1191" dy="0">仅训练阶段</tspan></text>
+<rect x="45" y="155" width="360" height="760" rx="6" fill="#FFFFFF" stroke="#65707C" stroke-width="2.2"/>
+  <rect x="61" y="138" width="157" height="34" rx="4" fill="#FFFFFF" stroke="#65707C" stroke-width="1.8"/>
+  <text x="139.5" y="162" text-anchor="middle" class="group-title">可观测输入</text>
+<rect x="75" y="220" width="300" height="145" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="225" y="255" text-anchor="middle" class="box-title"><tspan x="225" dy="0">历史运动 H</tspan></text>
+<text x="225" y="288" text-anchor="middle" class="body"><tspan x="225" dy="0">TCN 历史摘要</tspan><tspan x="225" dy="26">均值 + 最后时刻 + 首尾变化</tspan><tspan x="225" dy="26">无真实未来</tspan></text>
+<rect x="75" y="445" width="300" height="145" rx="5" fill="#FFF7E6" stroke="#9B6A20" stroke-width="2"/><text x="225" y="480" text-anchor="middle" class="box-title"><tspan x="225" dy="0">千问语义 Hq</tspan></text>
+<text x="225" y="513" text-anchor="middle" class="body"><tspan x="225" dy="0">船型 / 吃水 / 目的港</tspan><tspan x="225" dy="26">冻结、离线、不含航路标签</tspan></text>
+<rect x="75" y="670" width="300" height="155" rx="5" fill="#FFF7E6" stroke="#9B6A20" stroke-width="2"/><text x="225" y="705" text-anchor="middle" class="box-title"><tspan x="225" dy="0">航路几何原型</tspan></text>
+<text x="225" y="738" text-anchor="middle" class="body"><tspan x="225" dy="0">训练集中心线</tspan><tspan x="225" dy="26">距离 + 切向方向</tspan><tspan x="225" dy="26">主类与子类分别构建</tspan></text>
+<rect x="465" y="155" width="430" height="760" rx="6" fill="#FFFFFF" stroke="#3D7D55" stroke-width="2.2"/>
+  <rect x="481" y="138" width="180" height="34" rx="4" fill="#FFFFFF" stroke="#3D7D55" stroke-width="1.8"/>
+  <text x="571" y="162" text-anchor="middle" class="group-title">意图特征构建</text>
+<rect x="505" y="220" width="350" height="170" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="680" y="255" text-anchor="middle" class="box-title"><tspan x="680" dy="0">门控语义融合</tspan></text>
+<text x="680" y="288" text-anchor="middle" class="body"><tspan x="680" dy="0">Hq → 语义编码器</tspan><tspan x="680" dy="26">门值 g = sigmoid([H, Hq])</tspan><tspan x="680" dy="26">Hf = H + 0.25·g·Hq</tspan></text>
+<rect x="505" y="465" width="350" height="145" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="680" y="500" text-anchor="middle" class="box-title"><tspan x="680" dy="0">主航路分类头</tspan></text>
+<text x="680" y="533" text-anchor="middle" class="body"><tspan x="680" dy="0">主航路分类得分</tspan><tspan x="680" dy="26">+ 千问语义残差</tspan><tspan x="680" dy="26">+ 主航路原型先验</tspan></text>
+<rect x="505" y="690" width="350" height="155" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="680" y="725" text-anchor="middle" class="box-title"><tspan x="680" dy="0">子航路分类头</tspan></text>
+<text x="680" y="758" text-anchor="middle" class="body"><tspan x="680" dy="0">子航路分类得分</tspan><tspan x="680" dy="26">+ 主子航路层级约束</tspan><tspan x="680" dy="26">+ 子航路/未来模式先验</tspan></text>
+<polyline points="680,390 680,465" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="680,610 680,690" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="955" y="155" width="450" height="760" rx="6" fill="#FFFFFF" stroke="#3D7D55" stroke-width="2.2"/>
+  <rect x="971" y="138" width="157" height="34" rx="4" fill="#FFFFFF" stroke="#3D7D55" stroke-width="1.8"/>
+  <text x="1049.5" y="162" text-anchor="middle" class="group-title">可靠性判断</text>
+<rect x="995" y="220" width="370" height="175" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1180" y="255" text-anchor="middle" class="box-title"><tspan x="1180" dy="0">主航路可判别门</tspan></text>
+<text x="1180" y="288" text-anchor="middle" class="body"><tspan x="1180" dy="0">最高类别置信度</tspan><tspan x="1180" dy="26">第一名与第二名概率间隔</tspan><tspan x="1180" dy="26">学习得到的可判别性 dr</tspan><tspan x="1180" dy="26">三项共同通过才允许唯一选择</tspan></text>
+<rect x="995" y="470" width="370" height="135" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1180" y="505" text-anchor="middle" class="box-title"><tspan x="1180" dy="0">置信度门控层级约束</tspan></text>
+<text x="1180" y="538" text-anchor="middle" class="body"><tspan x="1180" dy="0">大类可靠：加强父子约束</tspan><tspan x="1180" dy="26">大类不可靠：自动减弱约束</tspan></text>
+<rect x="995" y="680" width="370" height="175" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1180" y="715" text-anchor="middle" class="box-title"><tspan x="1180" dy="0">子航路可判别门</tspan></text>
+<text x="1180" y="748" text-anchor="middle" class="body"><tspan x="1180" dy="0">置信度 + 概率间隔 + ds</tspan><tspan x="1180" dy="26">可判别：唯一子航路</tspan><tspan x="1180" dy="26">不可判别：保留前两类</tspan><tspan x="1180" dy="26">避免分叉前强行猜测</tspan></text>
+<polyline points="1180,395 1180,470" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="1180,605 1180,680" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="1465" y="155" width="690" height="760" rx="6" fill="#FFFFFF" stroke="#4A79A8" stroke-width="2.2"/>
+  <rect x="1481" y="138" width="180" height="34" rx="4" fill="#FFFFFF" stroke="#4A79A8" stroke-width="1.8"/>
+  <text x="1571" y="162" text-anchor="middle" class="group-title">概率条件输出</text>
+<rect x="1510" y="230" width="600" height="160" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="1810" y="265" text-anchor="middle" class="box-title"><tspan x="1810" dy="0">主航路概率 P(主航路)</tspan></text>
+<text x="1810" y="298" text-anchor="middle" class="body"><tspan x="1810" dy="0">OA / OB1 / OB2 / OC</tspan><tspan x="1810" dy="26">温度系数 = 1.30</tspan><tspan x="1810" dy="26">高置信时唯一选择，否则保留校准后的前两类</tspan></text>
+<rect x="1510" y="485" width="600" height="180" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="1810" y="520" text-anchor="middle" class="box-title"><tspan x="1810" dy="0">子航路概率 P(子航路)</tspan></text>
+<text x="1810" y="553" text-anchor="middle" class="body"><tspan x="1810" dy="0">OA_S00 / OA_S01 / OA_S02</tspan><tspan x="1810" dy="26">OB1_S00 / OB2_S00 / OC_S00</tspan><tspan x="1810" dy="26">温度系数 = 0.90</tspan><tspan x="1810" dy="26">高置信时唯一选择，否则保留校准后的前两类</tspan></text>
+<rect x="1510" y="745" width="600" height="110" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="1810" y="780" text-anchor="middle" class="box-title"><tspan x="1810" dy="0">条件回注</tspan></text>
+<text x="1810" y="813" text-anchor="middle" class="body"><tspan x="1810" dy="0">主航路概率 → 主航路嵌入；子航路概率 → 子航路嵌入</tspan></text>
+<polyline points="1810,390 1810,485" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="1810,665 1810,745" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="405,292 465,292" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="405,517 435,517 435,330 505,330" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="405,747 435,747 435,535 505,535" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="405,747 450,747 450,767 505,767" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="895,535 955,535" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="895,767 955,767" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="1405,307 1465,307" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="1405,767 1465,767" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="465" y="985" width="940" height="85" rx="6" fill="#FFFFFF" stroke="#7556A8" stroke-width="2.2" stroke-dasharray="10 7"/>
+  <rect x="481" y="968" width="160" height="34" rx="4" fill="#FFFFFF" stroke="#7556A8" stroke-width="1.8" stroke-dasharray="10 7"/>
+  <text x="561" y="992" text-anchor="middle" class="group-title">训练监督</text>
+<text x="935" y="1030" text-anchor="middle" class="body"><tspan x="935" dy="0">分阶段硬/软标签 + 可判别性二元交叉熵 + 难样本聚焦/类别权重 + 监督式对比损失</tspan></text>
+<polyline points="680,985 680,915" fill="none" stroke="#7556A8" stroke-width="2.3" stroke-linejoin="round" stroke-dasharray="8 6" marker-end="url(#arrowTrain)"/><polyline points="1180,985 1180,915" fill="none" stroke="#7556A8" stroke-width="2.3" stroke-linejoin="round" stroke-dasharray="8 6" marker-end="url(#arrowTrain)"/></svg>

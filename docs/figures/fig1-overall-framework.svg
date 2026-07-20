@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3420" height="1650" viewBox="0 0 3420 1650" role="img" aria-labelledby="title desc">
+  <title id="title">改进 iTentformer 详细数据流总框架</title>
+  <desc id="desc">从历史船舶自动识别系统（AIS）数据、差分序列、航次语义和训练集航路原型开始，逐项展示运动编码、语义门控、主子航路分类得分融合、可判别路由、条件解码、残差合成、多候选生成和选择器输入。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,4 L0,8 z" fill="#4B5563"/>
+    </marker>
+    <marker id="arrowTrain" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,4 L0,8 z" fill="#7556A8"/>
+    </marker>
+    <style>
+      text { font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", Arial, sans-serif; fill: #20262E; letter-spacing: 0; }
+      .figure-title { font-size: 34px; font-weight: 500; }
+      .group-title { font-size: 23px; font-weight: 500; }
+      .box-title { font-size: 21px; font-weight: 500; }
+      .body { font-size: 17px; font-weight: 400; }
+      .small { font-size: 15px; font-weight: 400; fill: #5C6672; }
+      .formula { font-size: 19px; font-weight: 500; }
+      .step { font-size: 17px; font-weight: 500; }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="3420" height="1650" fill="#FFFFFF"/>
+  <text x="1710" y="52" text-anchor="middle" class="figure-title">改进 iTentformer 详细数据流总框架</text>
+<rect x="1260" y="72" width="22" height="15" rx="2" fill="#EAF2FB" stroke="#4A79A8" stroke-width="1.5"/><text x="1291" y="85" text-anchor="start" class="small"><tspan x="1291" dy="0">原始主干</tspan></text>
+<rect x="1405" y="72" width="22" height="15" rx="2" fill="#ECF5EF" stroke="#3D7D55" stroke-width="1.5"/><text x="1436" y="85" text-anchor="start" class="small"><tspan x="1436" dy="0">本文新增</tspan></text>
+<rect x="1550" y="72" width="22" height="15" rx="2" fill="#FFF7E6" stroke="#9B6A20" stroke-width="1.5"/><text x="1581" y="85" text-anchor="start" class="small"><tspan x="1581" dy="0">语义/几何先验</tspan></text>
+<rect x="1720" y="72" width="22" height="15" rx="2" fill="#F4F0FA" stroke="#7556A8" stroke-width="1.5" stroke-dasharray="4 3"/><text x="1751" y="85" text-anchor="start" class="small"><tspan x="1751" dy="0">仅训练阶段</tspan></text>
+<rect x="35" y="150" width="290" height="810" rx="6" fill="#FFFFFF" stroke="#65707C" stroke-width="2.2"/>
+  <rect x="51" y="133" width="157" height="34" rx="4" fill="#FFFFFF" stroke="#65707C" stroke-width="1.8"/>
+  <text x="129.5" y="157" text-anchor="middle" class="group-title">输入与先验</text>
+<rect x="365" y="150" width="340" height="810" rx="6" fill="#FFFFFF" stroke="#4A79A8" stroke-width="2.2"/>
+  <rect x="381" y="133" width="150" height="34" rx="4" fill="#FFFFFF" stroke="#4A79A8" stroke-width="1.8"/>
+  <text x="456" y="157" text-anchor="middle" class="group-title">编码器</text>
+<rect x="745" y="150" width="1040" height="810" rx="6" fill="#FFFFFF" stroke="#3D7D55" stroke-width="2.2"/>
+  <rect x="761" y="133" width="180" height="34" rx="4" fill="#FFFFFF" stroke="#3D7D55" stroke-width="1.8"/>
+  <text x="851" y="157" text-anchor="middle" class="group-title">层级意图推理</text>
+<rect x="1825" y="150" width="660" height="810" rx="6" fill="#FFFFFF" stroke="#3D7D55" stroke-width="2.2"/>
+  <rect x="1841" y="133" width="180" height="34" rx="4" fill="#FFFFFF" stroke="#3D7D55" stroke-width="1.8"/>
+  <text x="1931" y="157" text-anchor="middle" class="group-title">条件轨迹解码</text>
+<rect x="2525" y="150" width="580" height="810" rx="6" fill="#FFFFFF" stroke="#3D7D55" stroke-width="2.2"/>
+  <rect x="2541" y="133" width="180" height="34" rx="4" fill="#FFFFFF" stroke="#3D7D55" stroke-width="1.8"/>
+  <text x="2631" y="157" text-anchor="middle" class="group-title">多候选与选择</text>
+<rect x="3145" y="150" width="235" height="810" rx="6" fill="#FFFFFF" stroke="#65707C" stroke-width="2.2"/>
+  <rect x="3161" y="133" width="150" height="34" rx="4" fill="#FFFFFF" stroke="#65707C" stroke-width="1.8"/>
+  <text x="3236" y="157" text-anchor="middle" class="group-title">最终输出</text>
+<rect x="60" y="205" width="240" height="105" rx="5" fill="#F7F8FA" stroke="#65707C" stroke-width="2"/><text x="180" y="234" text-anchor="middle" class="box-title"><tspan x="180" dy="0">状态序列 X</tspan></text>
+<text x="180" y="260" text-anchor="middle" class="body"><tspan x="180" dy="0">航向 COG、经度 Lon</tspan><tspan x="180" dy="23">纬度 Lat、航速 SOG</tspan></text>
+<rect x="60" y="370" width="240" height="105" rx="5" fill="#F7F8FA" stroke="#65707C" stroke-width="2"/><text x="180" y="399" text-anchor="middle" class="box-title"><tspan x="180" dy="0">差分序列 ΔX</tspan></text>
+<text x="180" y="425" text-anchor="middle" class="body"><tspan x="180" dy="0">航向/经纬度/航速的差分</tspan></text>
+<rect x="60" y="535" width="240" height="120" rx="5" fill="#FFF7E6" stroke="#9B6A20" stroke-width="2"/><text x="180" y="564" text-anchor="middle" class="box-title"><tspan x="180" dy="0">预测前航次上下文 C</tspan></text>
+<text x="180" y="590" text-anchor="middle" class="body"><tspan x="180" dy="0">船型、吃水、目的港</tspan><tspan x="180" dy="26">不读取真实未来</tspan></text>
+<rect x="60" y="715" width="240" height="135" rx="5" fill="#FFF7E6" stroke="#9B6A20" stroke-width="2"/><text x="180" y="744" text-anchor="middle" class="box-title"><tspan x="180" dy="0">训练集航路原型 R</tspan></text>
+<text x="180" y="770" text-anchor="middle" class="body"><tspan x="180" dy="0">主航路/子航路中心线</tspan><tspan x="180" dy="26">仅由固定训练集构建</tspan></text>
+<rect x="395" y="205" width="280" height="105" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="535" y="234" text-anchor="middle" class="box-title"><tspan x="535" dy="0">Transformer 全局编码器</tspan></text>
+<text x="535" y="260" text-anchor="middle" class="body"><tspan x="535" dy="0">X → Hx（全局运动）</tspan></text>
+<rect x="395" y="370" width="280" height="105" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="535" y="399" text-anchor="middle" class="box-title"><tspan x="535" dy="0">扩张时序卷积 TCN + SE</tspan></text>
+<text x="535" y="425" text-anchor="middle" class="body"><tspan x="535" dy="0">ΔX → Ht（局部意图序列）</tspan></text>
+<rect x="395" y="535" width="280" height="120" rx="5" fill="#FFF7E6" stroke="#9B6A20" stroke-width="2"/><text x="535" y="564" text-anchor="middle" class="box-title"><tspan x="535" dy="0">千问语义编码器</tspan></text>
+<text x="535" y="590" text-anchor="middle" class="body"><tspan x="535" dy="0">C → 冻结语义向量</tspan><tspan x="535" dy="26">多层感知机 MLP → Hq</tspan></text>
+<rect x="395" y="715" width="280" height="135" rx="5" fill="#FFF7E6" stroke="#9B6A20" stroke-width="2"/><text x="535" y="744" text-anchor="middle" class="box-title"><tspan x="535" dy="0">航路原型匹配评分</tspan></text>
+<text x="535" y="770" text-anchor="middle" class="body"><tspan x="535" dy="0">当前位置到中心线距离</tspan><tspan x="535" dy="26">+ 历史方向与切向一致性</tspan><tspan x="535" dy="26">→ 主/子航路原型得分</tspan></text>
+<polyline points="300,257 395,257" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="300,422 395,422" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="300,595 395,595" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="300,782 395,782" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="780" y="365" width="200" height="110" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="880" y="394" text-anchor="middle" class="box-title"><tspan x="880" dy="0">意图特征摘要</tspan></text>
+<text x="880" y="420" text-anchor="middle" class="body"><tspan x="880" dy="0">历史均值 Mean(Ht)</tspan><tspan x="880" dy="23">最后时刻 Last(Ht)</tspan><tspan x="880" dy="23">首尾变化 Last−First</tspan></text>
+<rect x="1020" y="350" width="230" height="140" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1135" y="379" text-anchor="middle" class="box-title"><tspan x="1135" dy="0">门控语义融合</tspan></text>
+<text x="1135" y="405" text-anchor="middle" class="body"><tspan x="1135" dy="0">门值 g = sigmoid([Hi,Hq])</tspan><tspan x="1135" dy="25">Hf = Hi + 0.25·g·Hq</tspan><tspan x="1135" dy="25">输出融合特征 Hf</tspan></text>
+<polyline points="675,422 780,422" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="980,422 1020,422" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="675,595 740,595 740,455 1020,455" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="726" y="558" width="48" height="23" rx="3" fill="#FFFFFF"/>
+  <text x="750" y="575" text-anchor="middle" class="small">Hq</text>
+<rect x="1285" y="205" width="190" height="105" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1380" y="234" text-anchor="middle" class="box-title"><tspan x="1380" dy="0">主航路分类头</tspan></text>
+<text x="1380" y="260" text-anchor="middle" class="body"><tspan x="1380" dy="0">Hf → 基础分类得分</tspan></text>
+<rect x="1510" y="195" width="220" height="125" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1620" y="224" text-anchor="middle" class="box-title"><tspan x="1620" dy="0">主航路得分融合 ⊕</tspan></text>
+<text x="1620" y="250" text-anchor="middle" class="body"><tspan x="1620" dy="0">基础得分 + 千问语义残差</tspan><tspan x="1620" dy="24">+ 主航路原型得分</tspan></text>
+<rect x="1285" y="565" width="190" height="105" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1380" y="594" text-anchor="middle" class="box-title"><tspan x="1380" dy="0">子航路分类头</tspan></text>
+<text x="1380" y="620" text-anchor="middle" class="body"><tspan x="1380" dy="0">Hf → 基础分类得分</tspan></text>
+<rect x="1510" y="535" width="220" height="165" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1620" y="564" text-anchor="middle" class="box-title"><tspan x="1620" dy="0">子航路得分融合 ⊕</tspan></text>
+<text x="1620" y="590" text-anchor="middle" class="body"><tspan x="1620" dy="0">基础得分 + 千问语义残差</tspan><tspan x="1620" dy="25">+ 子航路原型/未来先验</tspan><tspan x="1620" dy="25">+ 主航路概率 Pr 的层级偏置</tspan></text>
+<polyline points="1250,420 1265,420 1265,257 1285,257" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="1250,420 1265,420 1265,617 1285,617" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="1475,257 1510,257" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="1475,617 1510,617" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="1540" y="345" width="175" height="115" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1627.5" y="374" text-anchor="middle" class="box-title"><tspan x="1627.5" dy="0">主航路置信路由</tspan></text>
+<text x="1627.5" y="400" text-anchor="middle" class="body"><tspan x="1627.5" dy="0">温度系数 = 1.30</tspan><tspan x="1627.5" dy="24">置信度 + 概率间隔 + dr</tspan></text>
+<rect x="1540" y="725" width="175" height="115" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1627.5" y="754" text-anchor="middle" class="box-title"><tspan x="1627.5" dy="0">子航路置信路由</tspan></text>
+<text x="1627.5" y="780" text-anchor="middle" class="body"><tspan x="1627.5" dy="0">温度系数 = 0.90</tspan><tspan x="1627.5" dy="24">置信度 + 概率间隔 + ds</tspan></text>
+<polyline points="1620,320 1620,345" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="1620,700 1620,725" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="1730" y="345" width="35" height="115" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="1747.5" y="374" text-anchor="middle" class="box-title"><tspan x="1747.5" dy="0">Pr</tspan></text>
+<text x="1747.5" y="400" text-anchor="middle" class="small"><tspan x="1747.5" dy="0">er</tspan></text>
+<rect x="1730" y="725" width="35" height="115" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="1747.5" y="754" text-anchor="middle" class="box-title"><tspan x="1747.5" dy="0">Ps</tspan></text>
+<text x="1747.5" y="780" text-anchor="middle" class="small"><tspan x="1747.5" dy="0">es</tspan></text>
+<polyline points="1715,402 1730,402" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="1715,782 1730,782" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="1765,402 1775,402 1775,515 1620,515 1620,535" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="1645" y="488" width="130" height="23" rx="3" fill="#FFFFFF"/>
+  <text x="1710" y="505" text-anchor="middle" class="small">主航路层级约束 Pr</text>
+<rect x="1860" y="205" width="270" height="135" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="1995" y="234" text-anchor="middle" class="box-title"><tspan x="1995" dy="0">局部意图条件注入 ⊕</tspan></text>
+<text x="1995" y="260" text-anchor="middle" class="body"><tspan x="1995" dy="0">Hc = Ht + Wr·er + Ws·es</tspan><tspan x="1995" dy="26">保留前2类时按概率软加权</tspan></text>
+<rect x="1860" y="420" width="270" height="105" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="1995" y="449" text-anchor="middle" class="box-title"><tspan x="1995" dy="0">全局运动特征投影</tspan></text>
+<text x="1995" y="475" text-anchor="middle" class="body"><tspan x="1995" dy="0">Hx → 投影后的轨迹记忆特征</tspan></text>
+<rect x="2170" y="300" width="125" height="105" rx="5" fill="#F7F8FA" stroke="#65707C" stroke-width="2"/><text x="2232.5" y="329" text-anchor="middle" class="box-title"><tspan x="2232.5" dy="0">特征拼接</tspan></text>
+<text x="2232.5" y="355" text-anchor="middle" class="body"><tspan x="2232.5" dy="0">[Hx || Hc]</tspan></text>
+<rect x="2320" y="285" width="135" height="135" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="2387.5" y="314" text-anchor="middle" class="box-title"><tspan x="2387.5" dy="0">注意力融合块</tspan></text>
+<text x="2387.5" y="340" text-anchor="middle" class="body"><tspan x="2387.5" dy="0">四头注意力</tspan><tspan x="2387.5" dy="24">全局与局部特征交互</tspan></text>
+<rect x="2170" y="485" width="285" height="120" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="2312.5" y="514" text-anchor="middle" class="box-title"><tspan x="2312.5" dy="0">共享轨迹解码器</tspan></text>
+<text x="2312.5" y="540" text-anchor="middle" class="body"><tspan x="2312.5" dy="0">线性映射 → 共享残差 Rshared</tspan><tspan x="2312.5" dy="26">学习跨航路共性残差</tspan></text>
+<rect x="1860" y="675" width="210" height="105" rx="5" fill="#EAF2FB" stroke="#4A79A8" stroke-width="2"/><text x="1965" y="704" text-anchor="middle" class="box-title"><tspan x="1965" dy="0">线性运动基线</tspan></text>
+<text x="1965" y="730" text-anchor="middle" class="body"><tspan x="1965" dy="0">X → B(X)</tspan></text>
+<rect x="2100" y="675" width="220" height="135" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="2210" y="704" text-anchor="middle" class="box-title"><tspan x="2210" dy="0">子航路残差专家库</tspan></text>
+<text x="2210" y="730" text-anchor="middle" class="body"><tspan x="2210" dy="0">停止梯度 stop-gradient(Hc)</tspan><tspan x="2210" dy="24">按 Ps 软加权/按类别选专家</tspan><tspan x="2210" dy="24">→ Rsub，缩放系数 = 0.25</tspan></text>
+<rect x="2350" y="675" width="105" height="135" rx="5" fill="#F7F8FA" stroke="#65707C" stroke-width="2"/><text x="2402.5" y="704" text-anchor="middle" class="box-title"><tspan x="2402.5" dy="0">残差求和 ⊕</tspan></text>
+<text x="2402.5" y="730" text-anchor="middle" class="body"><tspan x="2402.5" dy="0">Y0 = B(X)</tspan><tspan x="2402.5" dy="23">+ 共享残差</tspan><tspan x="2402.5" dy="23">+ 子航路残差</tspan></text>
+<polyline points="1765,402 1810,402 1810,250 1860,250" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="1807" y="373" width="36" height="23" rx="3" fill="#FFFFFF"/>
+  <text x="1825" y="390" text-anchor="middle" class="small">er</text>
+<polyline points="1765,782 1810,782 1810,295 1860,295" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="1807" y="743" width="36" height="23" rx="3" fill="#FFFFFF"/>
+  <text x="1825" y="760" text-anchor="middle" class="small">es</text>
+<polyline points="2130,272 2150,272 2150,335 2170,335" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="2130,472 2150,472 2150,370 2170,370" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="2295,352 2320,352" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="2387,420 2387,485" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="2130,272 2150,272 2150,675" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="2455,545 2470,545 2470,715 2455,715" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="2070,727 2085,727 2085,840 2402,840 2402,810" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="2320,742 2350,742" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="2560" y="205" width="235" height="120" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="2677.5" y="234" text-anchor="middle" class="box-title"><tspan x="2677.5" dy="0">候选航路条件</tspan></text>
+<text x="2677.5" y="260" text-anchor="middle" class="body"><tspan x="2677.5" dy="0">全部 6 个子航路编号</tspan><tspan x="2677.5" dy="26">查表得到 er(k)、es(k)</tspan></text>
+<rect x="2560" y="390" width="235" height="150" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="2677.5" y="419" text-anchor="middle" class="box-title"><tspan x="2677.5" dy="0">参数共享的条件轨迹解码</tspan></text>
+<text x="2677.5" y="445" text-anchor="middle" class="body"><tspan x="2677.5" dy="0">输入 Ht、Hx、er(k)、es(k)</tspan><tspan x="2677.5" dy="25">同一解码器 + 第 k 个专家</tspan><tspan x="2677.5" dy="25">→ Y1 ... Y6</tspan></text>
+<rect x="2825" y="390" width="235" height="150" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="2942.5" y="419" text-anchor="middle" class="box-title"><tspan x="2942.5" dy="0">候选轨迹池</tspan></text>
+<text x="2942.5" y="445" text-anchor="middle" class="body"><tspan x="2942.5" dy="0">{Y0, Y1, ..., Y6}</tspan><tspan x="2942.5" dy="25">1 条基础轨迹 + 6 条分支</tspan><tspan x="2942.5" dy="25">共 7 条候选</tspan></text>
+<rect x="2560" y="675" width="235" height="155" rx="5" fill="#FFF7E6" stroke="#9B6A20" stroke-width="2"/><text x="2677.5" y="704" text-anchor="middle" class="box-title"><tspan x="2677.5" dy="0">选择器输入特征拼接</tspan></text>
+<text x="2677.5" y="730" text-anchor="middle" class="body"><tspan x="2677.5" dy="0">Hf || 主/子航路嵌入</tspan><tspan x="2677.5" dy="24">|| 主/子航路对数概率</tspan><tspan x="2677.5" dy="24">|| 连续性/平滑性</tspan><tspan x="2677.5" dy="24">|| 原型距离/基础候选标记</tspan></text>
+<rect x="2825" y="675" width="235" height="155" rx="5" fill="#ECF5EF" stroke="#3D7D55" stroke-width="2"/><text x="2942.5" y="704" text-anchor="middle" class="box-title"><tspan x="2942.5" dy="0">候选轨迹选择器</tspan></text>
+<text x="2942.5" y="730" text-anchor="middle" class="body"><tspan x="2942.5" dy="0">层归一化 → MLP → 候选得分</tspan><tspan x="2942.5" dy="25">+ 航路概率先验</tspan><tspan x="2942.5" dy="25">概率归一化 + 校准切换</tspan></text>
+<polyline points="2677,325 2677,390" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="2455,742 2485,742 2485,870 2942,870 2942,540" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="2659" y="841" width="82" height="23" rx="3" fill="#FFFFFF"/>
+  <text x="2700" y="858" text-anchor="middle" class="small">基础轨迹 Y0</text>
+<polyline points="2795,465 2825,465" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="2942,540 2942,650 2677,650 2677,675" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="2795,752 2825,752" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><polyline points="3060,752 3110,752 3110,510 3145,510" fill="none" stroke="#4B5563" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arrow)"/><rect x="3175" y="360" width="175" height="300" rx="5" fill="#F7F8FA" stroke="#65707C" stroke-width="2"/><text x="3262.5" y="395" text-anchor="middle" class="box-title"><tspan x="3262.5" dy="0">最终轨迹 Ŷ</tspan></text>
+<text x="3262.5" y="428" text-anchor="middle" class="body"><tspan x="3262.5" dy="0">未来 12 点 / 3 小时</tspan><tspan x="3262.5" dy="29">经度 Lon、纬度 Lat</tspan><tspan x="3262.5" dy="29">航向 COG、航速 SOG</tspan><tspan x="3262.5" dy="29">选中的主航路</tspan><tspan x="3262.5" dy="29">选中的子航路</tspan><tspan x="3262.5" dy="29">置信度</tspan><tspan x="3262.5" dy="29">不确定性</tspan></text>
+<rect x="365" y="1110" width="2740" height="390" rx="6" fill="#FFFFFF" stroke="#7556A8" stroke-width="2.2" stroke-dasharray="10 7"/>
+  <rect x="381" y="1093" width="350" height="34" rx="4" fill="#FFFFFF" stroke="#7556A8" stroke-width="1.8" stroke-dasharray="10 7"/>
+  <text x="556" y="1117" text-anchor="middle" class="group-title">训练阶段监督（推理时全部移除）</text>
+<rect x="410" y="1170" width="580" height="240" rx="5" fill="#F4F0FA" stroke="#7556A8" stroke-width="2" stroke-dasharray="8 6"/><text x="700" y="1205" text-anchor="middle" class="box-title"><tspan x="700" dy="0">标签与小类均衡意图流</tspan></text>
+<text x="700" y="1238" text-anchor="middle" class="body"><tspan x="700" dy="0">主/子航路标签 + 分阶段可判别性</tspan><tspan x="700" dy="30">轨迹级均衡采样 + 类别权重</tspan><tspan x="700" dy="30">主航路/子航路/可判别性/对比损失</tspan><tspan x="700" dy="30">只更新意图相关模块，不替换自然分布主流</tspan></text>
+<rect x="1040" y="1170" width="580" height="240" rx="5" fill="#F4F0FA" stroke="#7556A8" stroke-width="2" stroke-dasharray="8 6"/><text x="1330" y="1205" text-anchor="middle" class="box-title"><tspan x="1330" dy="0">真实未来轨迹监督</tspan></text>
+<text x="1330" y="1238" text-anchor="middle" class="body"><tspan x="1330" dy="0">真实未来 Ygt → 轨迹回归监督</tspan><tspan x="1330" dy="30">均方误差 + 地理距离 + 终点位移误差 FDE</tspan><tspan x="1330" dy="30">+ 平滑损失 + 环形航向 COG 损失</tspan><tspan x="1330" dy="30">验证：平均位移误差 ADE + 0.2·FDE</tspan></text>
+<rect x="1670" y="1170" width="580" height="240" rx="5" fill="#F4F0FA" stroke="#7556A8" stroke-width="2" stroke-dasharray="8 6"/><text x="1960" y="1205" text-anchor="middle" class="box-title"><tspan x="1960" dy="0">未来增强意图教师</tspan></text>
+<text x="1960" y="1238" text-anchor="middle" class="body"><tspan x="1960" dy="0">未来相对位移 → 未来运动编码器</tspan><tspan x="1960" dy="30">形成子航路未来模式原型</tspan><tspan x="1960" dy="30">仅在可判别窗口对齐 Hf</tspan><tspan x="1960" dy="30">教师分类得分作为温和残差</tspan></text>
+<rect x="2300" y="1170" width="755" height="240" rx="5" fill="#F4F0FA" stroke="#7556A8" stroke-width="2" stroke-dasharray="8 6"/><text x="2677.5" y="1205" text-anchor="middle" class="box-title"><tspan x="2677.5" dy="0">候选优胜者监督</tspan></text>
+<text x="2677.5" y="1238" text-anchor="middle" class="body"><tspan x="2677.5" dy="0">候选代价 = 平均位移误差 ADE + 0.2·终点误差 FDE</tspan><tspan x="2677.5" dy="30">取最小代价候选作为优胜目标</tspan><tspan x="2677.5" dy="30">选择器损失 = 软排序 + 代价回归</tspan><tspan x="2677.5" dy="30">候选损失 = 优胜轨迹回归；推理时不看真实未来</tspan></text>
+<polyline points="700,1170 700,1010 1380,1010 1380,670" fill="none" stroke="#7556A8" stroke-width="2.3" stroke-linejoin="round" stroke-dasharray="8 6" marker-end="url(#arrowTrain)"/><polyline points="700,1010 1240,1010 1240,257 1285,257" fill="none" stroke="#7556A8" stroke-width="2.3" stroke-linejoin="round" stroke-dasharray="8 6" marker-end="url(#arrowTrain)"/><polyline points="1330,1170 1330,1040 2387,1040 2387,810" fill="none" stroke="#7556A8" stroke-width="2.3" stroke-linejoin="round" stroke-dasharray="8 6" marker-end="url(#arrowTrain)"/><polyline points="1960,1170 1960,1060 1490,1060 1490,675 1510,675" fill="none" stroke="#7556A8" stroke-width="2.3" stroke-linejoin="round" stroke-dasharray="8 6" marker-end="url(#arrowTrain)"/><polyline points="2677,1170 2677,1080 2942,1080 2942,830" fill="none" stroke="#7556A8" stroke-width="2.3" stroke-linejoin="round" stroke-dasharray="8 6" marker-end="url(#arrowTrain)"/><text x="1710" y="1570" text-anchor="middle" class="small"><tspan x="1710" dy="0">实线：训练与推理共享的数据流；紫色虚线：仅训练监督；所有融合节点均在图中显式标注。</tspan></text>
+</svg>

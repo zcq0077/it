@@ -1,13 +1,8 @@
-import math
-import sys
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torch.optim as optim
 from torch.nn.utils import weight_norm
 from torch.nn.init import kaiming_normal_
-from scipy.stats import multivariate_normal
 
 
 class SELayer(nn.Module):
@@ -222,13 +217,18 @@ class TransformerEncoder(nn.Module):
 
 
 class TrajModel(nn.Module):
-    def __init__(self, input_dim, d_model, output_dim, concat_dim, input_length, dropout):
+    def __init__(self, input_dim, d_model, output_dim, concat_dim, input_length, target_length, dropout):
         super(TrajModel, self).__init__()
-        self.Fusion = FusionBlock(d_model, input_length, dropout)
-        self.input_embedding = nn.Linear(input_dim, d_model)
-        self.concat_linear = nn.Linear(concat_dim * 10, output_dim * 10)
-        self.fc = nn.Linear(d_model, 10)
-        self.fc2 = nn.Linear(d_model, 10)
+        self.input_length = int(input_length)
+        self.target_length = int(target_length)
+        self.Fusion = FusionBlock(d_model, self.target_length, dropout)
+        self.input_embedding = nn.Linear(self.input_length, d_model)
+        self.concat_linear = nn.Linear(
+            concat_dim * self.target_length,
+            output_dim * self.target_length,
+        )
+        self.fc = nn.Linear(d_model, self.target_length)
+        self.fc2 = nn.Linear(d_model, self.target_length)
 
         self.encoder_layer = TransformerEncoderLayer(d_model=d_model, nhead=4, dim_feedforward=512, dropout=dropout)
         self.encoder = TransformerEncoder(self.encoder_layer, num_layers=1)
@@ -242,30 +242,933 @@ class TrajModel(nn.Module):
         src = self.input_embedding(src).cuda()
         src = self.positional_encoding(src).cuda()
 
-        encode = self.encoder(src, src_key_padding_mask=None)  # 16*8*128
-        encode = self.fc(encode)  # 16*8*10
-        memory_cat = torch.cat((encode.transpose(1, 2), intent), dim=-1)  # 16*10*40
-        memory_cat, attn_weights = self.Fusion(memory_cat)  # 16*40*128
-        memory_cat = self.fc2(memory_cat)  # 16*40*10
+        encode = self.encoder(src, src_key_padding_mask=None)
+        encode = self.fc(encode)
+        if intent.size(1) != self.target_length:
+            intent = F.interpolate(
+                intent.transpose(1, 2),
+                size=self.target_length,
+                mode="linear",
+                align_corners=False,
+            ).transpose(1, 2)
+        memory_cat = torch.cat((encode.transpose(1, 2), intent), dim=-1)
+        memory_cat, attn_weights = self.Fusion(memory_cat)
+        memory_cat = self.fc2(memory_cat)
 
         memory_cat = memory_cat.reshape(memory_cat.size(0), -1)
-        memory_cat = self.concat_linear(memory_cat)  # 16*400->16*40
-        out = memory_cat.reshape(memory_cat.size(0), 10, -1)
+        memory_cat = self.concat_linear(memory_cat)
+        out = memory_cat.reshape(memory_cat.size(0), self.target_length, -1)
 
         return out, attn_weights
+
+
+class SubrouteResidualExpertBank(nn.Module):
+    """Small per-subroute corrections on top of the shared trajectory decoder."""
+
+    def __init__(
+            self,
+            feature_dim,
+            hidden_dim,
+            class_count,
+            target_length,
+            output_dim,
+            dropout,
+            scale,
+    ):
+        super().__init__()
+        self.class_count = int(class_count)
+        self.target_length = int(target_length)
+        self.output_dim = int(output_dim)
+        self.scale = float(scale)
+        self.experts = nn.ModuleList()
+        for _ in range(self.class_count):
+            output_layer = nn.Linear(
+                hidden_dim,
+                self.target_length * self.output_dim,
+            )
+            nn.init.zeros_(output_layer.weight)
+            nn.init.zeros_(output_layer.bias)
+            self.experts.append(nn.Sequential(
+                nn.LayerNorm(feature_dim),
+                nn.Linear(feature_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                output_layer,
+            ))
+
+    def forward(self, feature, probabilities=None, class_ids=None):
+        if (probabilities is None) == (class_ids is None):
+            raise ValueError("Provide either subroute probabilities or class ids.")
+
+        # The expert learns a branch correction without pushing its private loss
+        # back into the shared history representation.
+        feature = feature.detach()
+        expert_outputs = torch.stack(
+            [expert(feature) for expert in self.experts],
+            dim=1,
+        ).reshape(
+            feature.size(0),
+            self.class_count,
+            self.target_length,
+            self.output_dim,
+        )
+        if class_ids is not None:
+            batch_index = torch.arange(feature.size(0), device=feature.device)
+            correction = expert_outputs[batch_index, class_ids.long()]
+        else:
+            correction = torch.sum(
+                probabilities[:, :, None, None] * expert_outputs,
+                dim=1,
+            )
+        return self.scale * correction
 
 
 class iTentformer(nn.Module):
 
     def __init__(self, input_size_tcn, input_size, local_intent_size, output_size, concat_dim, input_length,
-                 num_channels, kernel_size, d_model, dropout):
+                 target_length,
+                 num_channels, kernel_size, d_model, dropout, subroute_classes=0,
+                 use_subroute_intent_head=False, use_subroute_embedding=False, subroute_embedding_dim=16,
+                 route_classes=0, use_route_intent_head=False, use_route_embedding=False, route_embedding_dim=16,
+                 use_hierarchical_intent=False, route_to_subroute_mask=None, hierarchical_mask_strength=1.0,
+                 intent_summary_mode="mean", branch_routing_temperature=1.0,
+                 route_routing_temperature=None, subroute_routing_temperature=None,
+                 hard_subroute_routing=False, subroute_prototypes=None,
+                 prototype_prior_weight=0.0, prototype_distance_scale=0.25,
+                 prototype_direction_weight=0.5, route_prototypes=None,
+                 route_prototype_prior_weight=0.0, confidence_aware_routing=False,
+                 routing_confidence_threshold=0.8, routing_margin_threshold=0.35,
+                 use_learned_decidability=False, decidability_hidden_dim=64,
+                 route_decidability_gate_threshold=0.65,
+                 subroute_decidability_gate_threshold=0.60,
+                 confidence_gated_hierarchy=False, hierarchy_min_scale=0.15,
+                 routing_top_k=2, use_candidate_selector=False,
+                 candidate_selector_hidden_dim=64,
+                 candidate_probability_prior_weight=0.3,
+                 candidate_base_prior_bias=0.5,
+                 use_semantic_teacher=False, semantic_feature_dim=0,
+                 semantic_hidden_dim=128, semantic_fusion_weight=0.25,
+                 semantic_dropout=0.15,
+                 use_semantic_route_alignment=False,
+                 use_semantic_subroute_alignment=False,
+                 semantic_alignment_temperature=0.20,
+                 use_future_enhanced_intent=False, future_intent_dim=64,
+                 future_intent_temperature=0.2, future_intent_logit_weight=0.15,
+                 use_subroute_residual_experts=False,
+                 subroute_residual_hidden_dim=32,
+                 subroute_residual_scale=0.25,
+                 subroute_residual_dropout=0.10):
         super().__init__()
+        self.target_length = int(target_length)
         self.TCN = TCN(input_size_tcn, local_intent_size, num_channels, kernel_size, dropout=dropout)
-        self.TrajModel = TrajModel(input_size, d_model, output_size, concat_dim, input_length, dropout)
+        self.TrajModel = TrajModel(
+            input_size,
+            d_model,
+            output_size,
+            concat_dim,
+            input_length,
+            target_length,
+            dropout,
+        )
+        self.use_route_intent_head = use_route_intent_head and route_classes > 0
+        self.use_route_embedding = use_route_embedding and self.use_route_intent_head
+        self.route_classes = route_classes
+        self.use_subroute_intent_head = use_subroute_intent_head
+        self.use_subroute_embedding = use_subroute_embedding and use_subroute_intent_head and subroute_classes > 0
+        self.subroute_classes = subroute_classes
+        self.use_hierarchical_intent = (
+            use_hierarchical_intent
+            and self.use_route_intent_head
+            and self.use_subroute_intent_head
+            and subroute_classes > 0
+        )
+        self.hierarchical_mask_strength = hierarchical_mask_strength
+        self.intent_summary_mode = intent_summary_mode
+        self.branch_routing_temperature = branch_routing_temperature
+        self.route_routing_temperature = (
+            branch_routing_temperature
+            if route_routing_temperature is None
+            else route_routing_temperature
+        )
+        self.subroute_routing_temperature = (
+            branch_routing_temperature
+            if subroute_routing_temperature is None
+            else subroute_routing_temperature
+        )
+        self.hard_subroute_routing = hard_subroute_routing
+        self.prototype_prior_weight = prototype_prior_weight
+        self.prototype_distance_scale = prototype_distance_scale
+        self.prototype_direction_weight = prototype_direction_weight
+        self.route_prototype_prior_weight = route_prototype_prior_weight
+        self.confidence_aware_routing = confidence_aware_routing
+        self.routing_confidence_threshold = routing_confidence_threshold
+        self.routing_margin_threshold = routing_margin_threshold
+        self.routing_top_k = routing_top_k
+        self.use_learned_decidability = use_learned_decidability
+        self.route_decidability_gate_threshold = route_decidability_gate_threshold
+        self.subroute_decidability_gate_threshold = subroute_decidability_gate_threshold
+        self.confidence_gated_hierarchy = confidence_gated_hierarchy
+        self.hierarchy_min_scale = hierarchy_min_scale
+        self.use_candidate_selector = (
+            use_candidate_selector
+            and self.use_route_embedding
+            and self.use_subroute_embedding
+        )
+        self.candidate_probability_prior_weight = candidate_probability_prior_weight
+        self.candidate_base_prior_bias = candidate_base_prior_bias
+        feature_dim = num_channels[-1]
+        self.use_semantic_teacher = bool(
+            use_semantic_teacher and semantic_feature_dim > 0
+        )
+        self.semantic_feature_dim = int(semantic_feature_dim)
+        self.semantic_fusion_weight = float(semantic_fusion_weight)
+        self.use_semantic_route_alignment = bool(
+            self.use_semantic_teacher
+            and use_semantic_route_alignment
+            and self.use_route_embedding
+        )
+        self.use_semantic_subroute_alignment = bool(
+            self.use_semantic_route_alignment
+            and use_semantic_subroute_alignment
+            and self.use_subroute_embedding
+        )
+        self.semantic_alignment_temperature = float(semantic_alignment_temperature)
+        self.use_future_enhanced_intent = bool(
+            use_future_enhanced_intent
+            and self.use_subroute_intent_head
+            and subroute_classes > 0
+        )
+        self.future_intent_dim = int(future_intent_dim)
+        self.future_intent_temperature = float(future_intent_temperature)
+        self.future_intent_logit_weight = float(future_intent_logit_weight)
+        self.use_subroute_residual_experts = bool(
+            use_subroute_residual_experts
+            and self.use_subroute_embedding
+            and subroute_classes > 0
+        )
 
-    def forward(self, delta, src):
+        if route_prototypes is not None:
+            self.register_buffer("route_prototypes", route_prototypes.float())
+        else:
+            self.route_prototypes = None
+        if subroute_prototypes is not None:
+            self.register_buffer("subroute_prototypes", subroute_prototypes.float())
+        else:
+            self.subroute_prototypes = None
+
+        if intent_summary_mode == "mean_last_delta":
+            self.intent_summary = nn.Sequential(
+                nn.LayerNorm(feature_dim * 3),
+                nn.Linear(feature_dim * 3, feature_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.LayerNorm(feature_dim),
+            )
+        elif intent_summary_mode != "mean":
+            raise ValueError(f"Unsupported intent summary mode: {intent_summary_mode}")
+
+        if self.use_semantic_teacher:
+            self.semantic_encoder = nn.Sequential(
+                nn.LayerNorm(self.semantic_feature_dim),
+                nn.Linear(self.semantic_feature_dim, semantic_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(semantic_dropout),
+                nn.Linear(semantic_hidden_dim, feature_dim),
+                nn.LayerNorm(feature_dim),
+            )
+            if self.use_semantic_route_alignment:
+                self.semantic_route_reliability = nn.Sequential(
+                    nn.LayerNorm(feature_dim * 2),
+                    nn.Linear(feature_dim * 2, semantic_hidden_dim),
+                    nn.GELU(),
+                    nn.Dropout(semantic_dropout),
+                    nn.Linear(semantic_hidden_dim, 1),
+                    nn.Sigmoid(),
+                )
+                nn.init.constant_(self.semantic_route_reliability[-2].bias, -1.0)
+                if self.use_semantic_subroute_alignment:
+                    self.semantic_subroute_reliability = nn.Sequential(
+                        nn.LayerNorm(feature_dim * 2),
+                        nn.Linear(feature_dim * 2, semantic_hidden_dim),
+                        nn.GELU(),
+                        nn.Dropout(semantic_dropout),
+                        nn.Linear(semantic_hidden_dim, 1),
+                        nn.Sigmoid(),
+                    )
+                    nn.init.constant_(self.semantic_subroute_reliability[-2].bias, -1.0)
+            else:
+                self.semantic_fusion_gate = nn.Sequential(
+                    nn.Linear(feature_dim * 2, feature_dim),
+                    nn.Sigmoid(),
+                )
+
+        if self.use_route_intent_head:
+            self.route_head = nn.Sequential(
+                nn.LayerNorm(feature_dim),
+                nn.Linear(feature_dim, feature_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(feature_dim, route_classes),
+            )
+            if self.use_learned_decidability:
+                self.route_decidability_head = nn.Sequential(
+                    nn.LayerNorm(feature_dim),
+                    nn.Linear(feature_dim, decidability_hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(decidability_hidden_dim, 1),
+                )
+            if self.use_route_embedding:
+                self.route_embedding = nn.Embedding(route_classes, route_embedding_dim)
+                self.route_to_intent = nn.Linear(route_embedding_dim, feature_dim)
+            if self.use_semantic_teacher:
+                if self.use_semantic_route_alignment:
+                    self.semantic_route_projector = nn.Linear(feature_dim, route_embedding_dim)
+                else:
+                    self.semantic_route_head = nn.Linear(feature_dim, route_classes, bias=False)
+
+        if self.use_subroute_intent_head:
+            self.subroute_head = nn.Sequential(
+                nn.LayerNorm(feature_dim),
+                nn.Linear(feature_dim, feature_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(feature_dim, subroute_classes),
+            )
+            if self.use_learned_decidability:
+                self.subroute_decidability_head = nn.Sequential(
+                    nn.LayerNorm(feature_dim),
+                    nn.Linear(feature_dim, decidability_hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(decidability_hidden_dim, 1),
+                )
+            if self.use_subroute_embedding:
+                self.subroute_embedding = nn.Embedding(subroute_classes, subroute_embedding_dim)
+                self.subroute_to_intent = nn.Linear(subroute_embedding_dim, feature_dim)
+            if self.use_semantic_subroute_alignment:
+                self.semantic_subroute_projector = nn.Linear(feature_dim, subroute_embedding_dim)
+            elif self.use_semantic_teacher and not self.use_semantic_route_alignment:
+                self.semantic_subroute_head = nn.Linear(feature_dim, subroute_classes, bias=False)
+            if self.use_future_enhanced_intent:
+                self.history_future_projector = nn.Sequential(
+                    nn.LayerNorm(feature_dim),
+                    nn.Linear(feature_dim, self.future_intent_dim),
+                    nn.GELU(),
+                    nn.LayerNorm(self.future_intent_dim),
+                )
+                self.future_motion_encoder = nn.Sequential(
+                    nn.LayerNorm(self.target_length * 2),
+                    nn.Linear(self.target_length * 2, self.future_intent_dim),
+                    nn.GELU(),
+                    nn.Linear(self.future_intent_dim, self.future_intent_dim),
+                    nn.LayerNorm(self.future_intent_dim),
+                )
+                self.future_intent_prototypes = nn.Embedding(
+                    subroute_classes,
+                    self.future_intent_dim,
+                )
+
+        if self.use_candidate_selector:
+            selector_input_dim = (
+                feature_dim
+                + route_embedding_dim
+                + subroute_embedding_dim
+                + 6
+            )
+            self.candidate_selector = nn.Sequential(
+                nn.LayerNorm(selector_input_dim),
+                nn.Linear(selector_input_dim, candidate_selector_hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(candidate_selector_hidden_dim, 1),
+            )
+
+        if getattr(self, "use_subroute_residual_experts", False):
+            self.subroute_residual_expert_bank = SubrouteResidualExpertBank(
+                feature_dim=feature_dim,
+                hidden_dim=subroute_residual_hidden_dim,
+                class_count=subroute_classes,
+                target_length=target_length,
+                output_dim=output_size,
+                dropout=subroute_residual_dropout,
+                scale=subroute_residual_scale,
+            )
+
+        if route_to_subroute_mask is not None:
+            self.register_buffer("route_to_subroute_mask", route_to_subroute_mask.float())
+        else:
+            self.route_to_subroute_mask = None
+
+    def _intent_feature(self, intent):
+        if self.intent_summary_mode == "mean":
+            return intent.mean(dim=1)
+        history_summary = torch.cat(
+            (intent.mean(dim=1), intent[:, -1, :], intent[:, -1, :] - intent[:, 0, :]),
+            dim=-1,
+        )
+        return self.intent_summary(history_summary)
+
+    def _fuse_semantic_feature(self, intent_feature, semantic_feature):
+        if not self.use_semantic_teacher or semantic_feature is None:
+            return intent_feature, None, None
+        if semantic_feature.ndim != 2 or semantic_feature.size(-1) != self.semantic_feature_dim:
+            raise ValueError(
+                "semantic_feature must have shape [batch, semantic_feature_dim]."
+            )
+        available = semantic_feature.float().norm(dim=-1, keepdim=True).gt(1e-6)
+        semantic_latent = self.semantic_encoder(semantic_feature.float())
+        semantic_latent = semantic_latent * available.to(semantic_latent.dtype)
+        if self.use_semantic_route_alignment:
+            return intent_feature, semantic_latent, available
+        gate = self.semantic_fusion_gate(
+            torch.cat((intent_feature, semantic_latent), dim=-1)
+        )
+        fused = intent_feature + self.semantic_fusion_weight * gate * semantic_latent
+        return fused, semantic_latent, available
+
+    def _semantic_alignment_logits(self, semantic_latent, projector, embedding, available):
+        query = F.normalize(projector(semantic_latent), dim=-1, eps=1e-6)
+        keys = F.normalize(embedding.weight, dim=-1, eps=1e-6)
+        logits = torch.matmul(query, keys.T) / max(
+            self.semantic_alignment_temperature,
+            1e-6,
+        )
+        return logits * available.to(dtype=logits.dtype)
+
+    def _future_mode_logits(self, history_feature):
+        if not self.use_future_enhanced_intent:
+            return None
+        history_embedding = F.normalize(
+            self.history_future_projector(history_feature),
+            dim=-1,
+            eps=1e-6,
+        )
+        prototypes = F.normalize(
+            self.future_intent_prototypes.weight,
+            dim=-1,
+            eps=1e-6,
+        )
+        return torch.matmul(history_embedding, prototypes.T) / max(
+            self.future_intent_temperature,
+            1e-6,
+        )
+
+    def future_enhanced_intent_loss(
+            self,
+            history_feature,
+            src,
+            future_target,
+            subroute_target,
+            decidability=None,
+            alignment_weight=0.5,
+    ):
+        """Use the true future only as a training-time teacher for intent prototypes."""
+        if not self.use_future_enhanced_intent:
+            return torch.zeros((), device=src.device), {}
+        if history_feature is None or subroute_target is None:
+            return torch.zeros((), device=src.device), {}
+
+        relative_future = future_target[:, :, 1:3] - src[:, -1:, 1:3]
+        future_embedding = F.normalize(
+            self.future_motion_encoder(relative_future.reshape(relative_future.size(0), -1)),
+            dim=-1,
+            eps=1e-6,
+        )
+        history_embedding = F.normalize(
+            self.history_future_projector(history_feature),
+            dim=-1,
+            eps=1e-6,
+        )
+        prototypes = F.normalize(
+            self.future_intent_prototypes.weight,
+            dim=-1,
+            eps=1e-6,
+        )
+        future_logits = torch.matmul(future_embedding, prototypes.T) / max(
+            self.future_intent_temperature,
+            1e-6,
+        )
+        future_classification = F.cross_entropy(
+            future_logits,
+            subroute_target.long(),
+        )
+
+        alignment_values = 1.0 - torch.sum(
+            history_embedding * future_embedding.detach(),
+            dim=-1,
+        )
+        if decidability is None:
+            alignment = alignment_values.mean()
+        else:
+            weights = decidability.to(
+                device=alignment_values.device,
+                dtype=alignment_values.dtype,
+            ).clamp(0.0, 1.0)
+            alignment = torch.sum(alignment_values * weights) / weights.sum().clamp_min(1.0)
+
+        loss = future_classification + float(alignment_weight) * alignment
+        with torch.no_grad():
+            future_acc = torch.mean(
+                (torch.argmax(future_logits, dim=-1) == subroute_target.long()).float()
+            )
+            mean_alignment = torch.mean(1.0 - alignment_values)
+        return loss, {
+            "future_acc": future_acc,
+            "history_future_cosine": mean_alignment,
+        }
+
+    def _routing_prob(
+            self,
+            logits,
+            target=None,
+            teacher_forcing_ratio=0.0,
+            hard=False,
+            teacher_forcing_weight=None,
+            temperature=None,
+            decidability_logits=None,
+            decidability_gate_threshold=0.5,
+    ):
+        if temperature is None:
+            temperature = self.branch_routing_temperature
+        temperature = max(float(temperature), 1e-6)
+        soft_prob = torch.softmax(logits / temperature, dim=-1)
+        routing_prob = soft_prob
+
+        if hard:
+            hard_prob = F.one_hot(
+                torch.argmax(soft_prob, dim=-1),
+                num_classes=soft_prob.size(-1),
+            ).to(dtype=soft_prob.dtype)
+            if self.training:
+                hard_prob = hard_prob + soft_prob - soft_prob.detach()
+
+            if self.confidence_aware_routing and soft_prob.size(-1) > 1:
+                top_k = min(max(int(self.routing_top_k), 1), soft_prob.size(-1))
+                top_values, top_indices = torch.topk(soft_prob, k=top_k, dim=-1)
+                top_k_prob = torch.zeros_like(soft_prob).scatter(-1, top_indices, top_values)
+                top_k_prob = top_k_prob / top_k_prob.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+                uncertain_prob = top_k_prob
+                top_two = torch.topk(soft_prob, k=2, dim=-1).values
+                confidence = top_two[:, :1]
+                margin = top_two[:, :1] - top_two[:, 1:2]
+                confident = (
+                    (confidence >= self.routing_confidence_threshold)
+                    & (margin >= self.routing_margin_threshold)
+                )
+                if self.use_learned_decidability and decidability_logits is not None:
+                    decidability_prob = torch.sigmoid(decidability_logits).reshape(-1, 1)
+                    uniform_top_k = torch.zeros_like(soft_prob).scatter(
+                        -1,
+                        top_indices,
+                        torch.ones_like(top_values),
+                    ) / float(top_k)
+                    uncertain_prob = (
+                        decidability_prob * top_k_prob
+                        + (1.0 - decidability_prob) * uniform_top_k
+                    )
+                    confident = confident & (
+                        decidability_prob >= float(decidability_gate_threshold)
+                    )
+                routing_prob = torch.where(confident, hard_prob, uncertain_prob)
+            else:
+                routing_prob = hard_prob
+
+        if self.training and target is not None and teacher_forcing_ratio > 0:
+            teacher_prob = F.one_hot(
+                target.long(),
+                num_classes=soft_prob.size(-1),
+            ).to(dtype=soft_prob.dtype)
+            teacher_probability = torch.full(
+                (soft_prob.size(0), 1),
+                float(teacher_forcing_ratio),
+                device=soft_prob.device,
+                dtype=soft_prob.dtype,
+            )
+            if teacher_forcing_weight is not None:
+                teacher_probability = teacher_probability * teacher_forcing_weight.reshape(-1, 1).to(
+                    device=soft_prob.device,
+                    dtype=soft_prob.dtype,
+                ).clamp(0.0, 1.0)
+            teacher_mask = torch.rand(
+                soft_prob.size(0), 1, device=soft_prob.device
+            ) < teacher_probability
+            routing_prob = torch.where(teacher_mask, teacher_prob, routing_prob)
+
+        return routing_prob
+
+    def _prototype_prior_logits(self, src, prototypes):
+        if prototypes is None:
+            return None
+
+        last_position = src[:, -1, 1:3]
+        history_direction = last_position - src[:, 0, 1:3]
+        distance = torch.linalg.vector_norm(
+            last_position[:, None, None, :] - prototypes[None, :, :, :],
+            dim=-1,
+        )
+        min_distance, nearest_index = torch.min(distance, dim=-1)
+
+        tangent = torch.empty_like(prototypes)
+        tangent[:, 0, :] = prototypes[:, 1, :] - prototypes[:, 0, :]
+        tangent[:, -1, :] = prototypes[:, -1, :] - prototypes[:, -2, :]
+        tangent[:, 1:-1, :] = prototypes[:, 2:, :] - prototypes[:, :-2, :]
+        expanded_tangent = tangent.unsqueeze(0).expand(src.size(0), -1, -1, -1)
+        gather_index = nearest_index[:, :, None, None].expand(-1, -1, 1, 2)
+        nearest_tangent = torch.gather(expanded_tangent, 2, gather_index).squeeze(2)
+
+        history_direction = F.normalize(history_direction, dim=-1, eps=1e-6)
+        nearest_tangent = F.normalize(nearest_tangent, dim=-1, eps=1e-6)
+        direction_similarity = torch.sum(
+            history_direction[:, None, :] * nearest_tangent,
+            dim=-1,
+        )
+        return (
+            -min_distance / max(float(self.prototype_distance_scale), 1e-6)
+            + self.prototype_direction_weight * direction_similarity
+        )
+
+    def decode_candidates(self, delta, src, candidate_route_ids, candidate_subroute_ids):
+        if not (self.use_route_embedding and self.use_subroute_embedding):
+            raise RuntimeError("Candidate decoding requires route and subroute embeddings.")
+
+        batch_size, candidate_count = candidate_route_ids.shape
+        base_intent = self.TCN(delta)
+        expanded_intent = base_intent[:, None, :, :].expand(
+            -1, candidate_count, -1, -1
+        ).reshape(batch_size * candidate_count, base_intent.size(1), base_intent.size(2))
+
+        route_emb = self.route_embedding(candidate_route_ids.reshape(-1))
+        route_bias = self.route_to_intent(route_emb).unsqueeze(1)
+        subroute_emb = self.subroute_embedding(candidate_subroute_ids.reshape(-1))
+        subroute_bias = self.subroute_to_intent(subroute_emb).unsqueeze(1)
+        candidate_intent = expanded_intent + route_bias + subroute_bias
+
+        expanded_src = src[:, None, :, :].expand(
+            -1, candidate_count, -1, -1
+        ).reshape(batch_size * candidate_count, src.size(1), src.size(2))
+        raw_output, _ = self.TrajModel(expanded_src.transpose(1, 2), candidate_intent)
+        if getattr(self, "use_subroute_residual_experts", False):
+            candidate_feature = self._intent_feature(candidate_intent)
+            raw_output = raw_output + self.subroute_residual_expert_bank(
+                candidate_feature,
+                class_ids=candidate_subroute_ids.reshape(-1),
+            )
+        return raw_output.reshape(
+            batch_size,
+            candidate_count,
+            raw_output.size(1),
+            raw_output.size(2),
+        )
+
+    def candidate_numeric_features(
+            self,
+            src,
+            route_logits,
+            subroute_logits,
+            candidate_route_ids,
+            candidate_subroute_ids,
+            candidate_value_outputs,
+            candidate_is_base=None,
+    ):
+        route_log_prob = F.log_softmax(
+            route_logits / max(float(self.route_routing_temperature), 1e-6),
+            dim=-1,
+        ).gather(1, candidate_route_ids)
+        subroute_log_prob = F.log_softmax(
+            subroute_logits / max(float(self.subroute_routing_temperature), 1e-6),
+            dim=-1,
+        ).gather(1, candidate_subroute_ids)
+
+        history_velocity = src[:, -1, 1:3] - src[:, -2, 1:3]
+        candidate_velocity = (
+            candidate_value_outputs[:, :, 0, 1:3]
+            - src[:, None, -1, 1:3]
+        )
+        continuity_error = torch.linalg.vector_norm(
+            candidate_velocity - history_velocity[:, None, :],
+            dim=-1,
+        )
+        all_velocity = candidate_value_outputs[:, :, 1:, 1:3] - candidate_value_outputs[:, :, :-1, 1:3]
+        if all_velocity.size(2) > 1:
+            smoothness_error = torch.linalg.vector_norm(
+                all_velocity[:, :, 1:, :] - all_velocity[:, :, :-1, :],
+                dim=-1,
+            ).mean(dim=-1)
+        else:
+            smoothness_error = torch.zeros_like(continuity_error)
+
+        if self.subroute_prototypes is not None:
+            candidate_prototypes = self.subroute_prototypes[candidate_subroute_ids]
+            candidate_positions = candidate_value_outputs[:, :, :, 1:3]
+            prototype_distance = torch.linalg.vector_norm(
+                candidate_positions[:, :, :, None, :]
+                - candidate_prototypes[:, :, None, :, :],
+                dim=-1,
+            ).min(dim=-1).values.mean(dim=-1)
+        else:
+            prototype_distance = torch.zeros_like(continuity_error)
+
+        if candidate_is_base is None:
+            candidate_is_base = torch.zeros_like(continuity_error)
+
+        return torch.stack(
+            (
+                route_log_prob,
+                subroute_log_prob,
+                -continuity_error,
+                -smoothness_error,
+                -prototype_distance,
+                candidate_is_base.to(dtype=continuity_error.dtype),
+            ),
+            dim=-1,
+        )
+
+    def score_candidates(
+            self,
+            src,
+            intent_feature,
+            route_logits,
+            subroute_logits,
+            candidate_route_ids,
+            candidate_subroute_ids,
+            candidate_value_outputs,
+            candidate_is_base=None,
+    ):
+        if not self.use_candidate_selector:
+            raise RuntimeError("Candidate selector is disabled.")
+
+        candidate_count = candidate_route_ids.size(1)
+        numeric_features = self.candidate_numeric_features(
+            src,
+            route_logits,
+            subroute_logits,
+            candidate_route_ids,
+            candidate_subroute_ids,
+            candidate_value_outputs,
+            candidate_is_base=candidate_is_base,
+        )
+        route_log_prob = numeric_features[:, :, 0]
+        subroute_log_prob = numeric_features[:, :, 1]
+        if candidate_is_base is None:
+            candidate_is_base = torch.zeros_like(route_log_prob)
+        route_emb = self.route_embedding(candidate_route_ids)
+        subroute_emb = self.subroute_embedding(candidate_subroute_ids)
+        expanded_feature = intent_feature[:, None, :].expand(-1, candidate_count, -1)
+        selector_input = torch.cat(
+            (
+                expanded_feature.detach(),
+                route_emb.detach(),
+                subroute_emb.detach(),
+                numeric_features.detach(),
+            ),
+            dim=-1,
+        )
+        learned_score = self.candidate_selector(selector_input).squeeze(-1)
+        probability_prior = route_log_prob + subroute_log_prob
+        return (
+            learned_score
+            + self.candidate_probability_prior_weight * probability_prior
+            + self.candidate_base_prior_bias * candidate_is_base
+        )
+
+    def forward(
+            self,
+            delta,
+            src,
+            semantic_feature=None,
+            route_target=None,
+            subroute_target=None,
+            teacher_forcing_ratio=0.0,
+            route_supervision_weight=None,
+            subroute_supervision_weight=None,
+            intent_only=False,
+    ):
         intent = self.TCN(delta)
-        out, _ = self.TrajModel(src.transpose(1, 2), intent)
-        out_intent = self.TCN.linear_intent(intent)
+        route_logits = None
+        route_feature = None
+        route_decidability_logits = None
+        subroute_logits = None
+        subroute_feature = None
+        subroute_decidability_logits = None
+        subroute_prob = None
+        semantic_route_logits = None
+        semantic_subroute_logits = None
+        semantic_route_gate = None
+        semantic_subroute_gate = None
+        intent_feature = self._intent_feature(intent)
+        intent_feature, semantic_latent, semantic_available = self._fuse_semantic_feature(
+            intent_feature,
+            semantic_feature,
+        )
 
+        if self.use_route_intent_head:
+            route_feature = intent_feature
+            route_logits = self.route_head(route_feature)
+            if semantic_latent is not None:
+                if self.use_semantic_route_alignment:
+                    semantic_route_logits = self._semantic_alignment_logits(
+                        semantic_latent,
+                        self.semantic_route_projector,
+                        self.route_embedding,
+                        semantic_available,
+                    )
+                    semantic_route_gate = self.semantic_route_reliability(
+                        torch.cat((route_feature, semantic_latent), dim=-1)
+                    ) * semantic_available.to(dtype=route_feature.dtype)
+                    route_logits = (
+                        route_logits
+                        + self.semantic_fusion_weight
+                        * semantic_route_gate
+                        * semantic_route_logits
+                    )
+                else:
+                    route_logits = route_logits + self.semantic_fusion_weight * self.semantic_route_head(
+                        semantic_latent
+                    )
+            if self.use_learned_decidability:
+                route_decidability_logits = self.route_decidability_head(route_feature).squeeze(-1)
+            route_prototype_prior = self._prototype_prior_logits(src, self.route_prototypes)
+            if route_prototype_prior is not None and self.route_prototype_prior_weight > 0:
+                route_logits = route_logits + self.route_prototype_prior_weight * route_prototype_prior
+            route_prob = self._routing_prob(
+                route_logits,
+                target=route_target,
+                teacher_forcing_ratio=teacher_forcing_ratio,
+                hard=self.confidence_aware_routing,
+                teacher_forcing_weight=route_supervision_weight,
+                temperature=self.route_routing_temperature,
+                decidability_logits=route_decidability_logits,
+                decidability_gate_threshold=self.route_decidability_gate_threshold,
+            )
+            if self.use_route_embedding:
+                route_emb = torch.matmul(route_prob, self.route_embedding.weight)
+                route_bias = self.route_to_intent(route_emb).unsqueeze(1)
+                intent = intent + route_bias
+
+        if self.use_subroute_intent_head:
+            subroute_feature = intent_feature
+            subroute_logits = self.subroute_head(subroute_feature)
+            if semantic_latent is not None:
+                if self.use_semantic_subroute_alignment:
+                    semantic_subroute_logits = self._semantic_alignment_logits(
+                        semantic_latent,
+                        self.semantic_subroute_projector,
+                        self.subroute_embedding,
+                        semantic_available,
+                    )
+                    semantic_subroute_gate = self.semantic_subroute_reliability(
+                        torch.cat((subroute_feature, semantic_latent), dim=-1)
+                    ) * semantic_available.to(dtype=subroute_feature.dtype)
+                    subroute_logits = (
+                        subroute_logits
+                        + self.semantic_fusion_weight
+                        * semantic_subroute_gate
+                        * semantic_subroute_logits
+                    )
+                elif not self.use_semantic_route_alignment:
+                    subroute_logits = subroute_logits + self.semantic_fusion_weight * self.semantic_subroute_head(
+                        semantic_latent
+                    )
+            future_mode_logits = self._future_mode_logits(subroute_feature)
+            if future_mode_logits is not None and self.future_intent_logit_weight > 0:
+                subroute_logits = (
+                    subroute_logits
+                    + self.future_intent_logit_weight * future_mode_logits
+                )
+            if self.use_learned_decidability:
+                subroute_decidability_logits = self.subroute_decidability_head(subroute_feature).squeeze(-1)
+            prototype_prior = self._prototype_prior_logits(src, self.subroute_prototypes)
+            if prototype_prior is not None:
+                subroute_logits = subroute_logits + self.prototype_prior_weight * prototype_prior
+            if self.use_hierarchical_intent and self.route_to_subroute_mask is not None:
+                subroute_gate = torch.matmul(route_prob, self.route_to_subroute_mask).clamp_min(1e-6)
+                hierarchy_scale = self.hierarchical_mask_strength
+                if self.confidence_gated_hierarchy:
+                    route_soft_prob = torch.softmax(
+                        route_logits / max(float(self.route_routing_temperature), 1e-6),
+                        dim=-1,
+                    )
+                    route_confidence = route_soft_prob.max(dim=-1).values
+                    if route_decidability_logits is None:
+                        route_reliability = route_confidence
+                    else:
+                        route_reliability = torch.sigmoid(route_decidability_logits)
+                    reliability_scale = (
+                        self.hierarchy_min_scale
+                        + (1.0 - self.hierarchy_min_scale)
+                        * route_confidence
+                        * route_reliability
+                    ).detach()
+                    hierarchy_scale = self.hierarchical_mask_strength * reliability_scale.unsqueeze(-1)
+                subroute_logits = subroute_logits + hierarchy_scale * torch.log(subroute_gate)
+            if self.use_subroute_embedding:
+                subroute_prob = self._routing_prob(
+                    subroute_logits,
+                    target=subroute_target,
+                    teacher_forcing_ratio=teacher_forcing_ratio,
+                    hard=self.hard_subroute_routing,
+                    teacher_forcing_weight=subroute_supervision_weight,
+                    temperature=self.subroute_routing_temperature,
+                    decidability_logits=subroute_decidability_logits,
+                    decidability_gate_threshold=self.subroute_decidability_gate_threshold,
+                )
+                subroute_emb = torch.matmul(subroute_prob, self.subroute_embedding.weight)
+                intent_bias = self.subroute_to_intent(subroute_emb).unsqueeze(1)
+                intent = intent + intent_bias
+
+        if intent_only:
+            model_output = (
+                None,
+                None,
+                route_logits,
+                subroute_logits,
+                route_feature,
+                subroute_feature,
+                route_decidability_logits,
+                subroute_decidability_logits,
+            )
+            if self.use_semantic_route_alignment:
+                model_output += (
+                    semantic_route_logits,
+                    semantic_subroute_logits,
+                    semantic_route_gate,
+                    semantic_subroute_gate,
+                )
+            return model_output
+
+        out, _ = self.TrajModel(src.transpose(1, 2), intent)
+        if getattr(self, "use_subroute_residual_experts", False):
+            out = out + self.subroute_residual_expert_bank(
+                self._intent_feature(intent),
+                probabilities=subroute_prob,
+            )
+        out_intent = self.TCN.linear_intent(intent)
+        if out_intent.size(1) != self.target_length:
+            out_intent = F.interpolate(
+                out_intent.transpose(1, 2),
+                size=self.target_length,
+                mode="linear",
+                align_corners=False,
+            ).transpose(1, 2)
+
+        if self.use_route_intent_head or self.use_subroute_intent_head:
+            model_output = (
+                out_intent,
+                out,
+                route_logits,
+                subroute_logits,
+                route_feature,
+                subroute_feature,
+                route_decidability_logits,
+                subroute_decidability_logits,
+            )
+            if self.use_semantic_route_alignment:
+                model_output += (
+                    semantic_route_logits,
+                    semantic_subroute_logits,
+                    semantic_route_gate,
+                    semantic_subroute_gate,
+                )
+            return model_output
         return out_intent, out

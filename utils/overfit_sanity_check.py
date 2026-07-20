@@ -42,10 +42,6 @@ def standardize_tracks(data):
     return tracks, scaler.mean_, scaler.scale_
 
 
-def inverse_standardized(values, transform, mean):
-    return values @ transform + mean[:4]
-
-
 def get_window(data_path, sample_index):
     data = pd.read_pickle(data_path)
     tracks, mean, std = standardize_tracks(data)
@@ -119,6 +115,7 @@ def main():
         output_size=4,
         concat_dim=40,
         input_length=INPUT_LENGTH,
+        target_length=TARGET_LENGTH,
         num_channels=[32] * 2,
         kernel_size=3,
         d_model=128,

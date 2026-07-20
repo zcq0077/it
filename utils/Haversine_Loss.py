@@ -1,10 +1,6 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import math
-import sys
-
-sys.path.append("../")
 
 
 def haversine_distance_2vectors(latA, lonA, latB, lonB, min_hav=0.0):
@@ -65,21 +61,3 @@ class Haversinedist(nn.Module):  # svr
         distances = haversine_distance_2arrays(lat_pred, lon_pred, lat_true, lon_true)
 
         return distances
-
-
-def haversine_distance_2points(latA, lonA, latB, lonB, min_hav=0.0):
-    r = 6371  # 地球半径,km
-    latA, lonA, latB, lonB = np.radians(latA), np.radians(lonA), np.radians(latB), np.radians(lonB)
-    dlat = latB - latA
-    dlon = lonB - lonA
-    hav = math.sin(dlat / 2) ** 2 + math.cos(latA) * math.cos(latB) * math.sin(dlon / 2) ** 2
-    hav = min(max(hav, min_hav), 1.0 - 1e-7)
-    distance_km = 2 * r * math.asin(math.sqrt(hav))
-    distance_nm = distance_km / 1.852  # 转换成海里
-    return distance_nm
-
-
-if __name__ == '__main__':
-    a = haversine_distance_2vectors(31.1, 115.4, 32.4, 113.8)
-    print(a)
-    # rmse = torch.sqrt(torch.mean(distances ** 2))
