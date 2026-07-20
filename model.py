@@ -349,6 +349,9 @@ class iTentformer(nn.Module):
                  use_semantic_teacher=False, semantic_feature_dim=0,
                  semantic_hidden_dim=128, semantic_fusion_weight=0.25,
                  semantic_dropout=0.15,
+                 use_semantic_route_alignment=False,
+                 use_semantic_subroute_alignment=False,
+                 semantic_alignment_temperature=0.20,
                  use_future_enhanced_intent=False, future_intent_dim=64,
                  future_intent_temperature=0.2, future_intent_logit_weight=0.15,
                  use_subroute_residual_experts=False,
@@ -419,6 +422,17 @@ class iTentformer(nn.Module):
         )
         self.semantic_feature_dim = int(semantic_feature_dim)
         self.semantic_fusion_weight = float(semantic_fusion_weight)
+        self.use_semantic_route_alignment = bool(
+            self.use_semantic_teacher
+            and use_semantic_route_alignment
+            and self.use_route_embedding
+        )
+        self.use_semantic_subroute_alignment = bool(
+            self.use_semantic_route_alignment
+            and use_semantic_subroute_alignment
+            and self.use_subroute_embedding
+        )
+        self.semantic_alignment_temperature = float(semantic_alignment_temperature)
         self.use_future_enhanced_intent = bool(
             use_future_enhanced_intent
             and self.use_subroute_intent_head
@@ -462,10 +476,31 @@ class iTentformer(nn.Module):
                 nn.Linear(semantic_hidden_dim, feature_dim),
                 nn.LayerNorm(feature_dim),
             )
-            self.semantic_fusion_gate = nn.Sequential(
-                nn.Linear(feature_dim * 2, feature_dim),
-                nn.Sigmoid(),
-            )
+            if self.use_semantic_route_alignment:
+                self.semantic_route_reliability = nn.Sequential(
+                    nn.LayerNorm(feature_dim * 2),
+                    nn.Linear(feature_dim * 2, semantic_hidden_dim),
+                    nn.GELU(),
+                    nn.Dropout(semantic_dropout),
+                    nn.Linear(semantic_hidden_dim, 1),
+                    nn.Sigmoid(),
+                )
+                nn.init.constant_(self.semantic_route_reliability[-2].bias, -1.0)
+                if self.use_semantic_subroute_alignment:
+                    self.semantic_subroute_reliability = nn.Sequential(
+                        nn.LayerNorm(feature_dim * 2),
+                        nn.Linear(feature_dim * 2, semantic_hidden_dim),
+                        nn.GELU(),
+                        nn.Dropout(semantic_dropout),
+                        nn.Linear(semantic_hidden_dim, 1),
+                        nn.Sigmoid(),
+                    )
+                    nn.init.constant_(self.semantic_subroute_reliability[-2].bias, -1.0)
+            else:
+                self.semantic_fusion_gate = nn.Sequential(
+                    nn.Linear(feature_dim * 2, feature_dim),
+                    nn.Sigmoid(),
+                )
 
         if self.use_route_intent_head:
             self.route_head = nn.Sequential(
@@ -487,7 +522,10 @@ class iTentformer(nn.Module):
                 self.route_embedding = nn.Embedding(route_classes, route_embedding_dim)
                 self.route_to_intent = nn.Linear(route_embedding_dim, feature_dim)
             if self.use_semantic_teacher:
-                self.semantic_route_head = nn.Linear(feature_dim, route_classes, bias=False)
+                if self.use_semantic_route_alignment:
+                    self.semantic_route_projector = nn.Linear(feature_dim, route_embedding_dim)
+                else:
+                    self.semantic_route_head = nn.Linear(feature_dim, route_classes, bias=False)
 
         if self.use_subroute_intent_head:
             self.subroute_head = nn.Sequential(
@@ -508,7 +546,9 @@ class iTentformer(nn.Module):
             if self.use_subroute_embedding:
                 self.subroute_embedding = nn.Embedding(subroute_classes, subroute_embedding_dim)
                 self.subroute_to_intent = nn.Linear(subroute_embedding_dim, feature_dim)
-            if self.use_semantic_teacher:
+            if self.use_semantic_subroute_alignment:
+                self.semantic_subroute_projector = nn.Linear(feature_dim, subroute_embedding_dim)
+            elif self.use_semantic_teacher and not self.use_semantic_route_alignment:
                 self.semantic_subroute_head = nn.Linear(feature_dim, subroute_classes, bias=False)
             if self.use_future_enhanced_intent:
                 self.history_future_projector = nn.Sequential(
@@ -571,7 +611,7 @@ class iTentformer(nn.Module):
 
     def _fuse_semantic_feature(self, intent_feature, semantic_feature):
         if not self.use_semantic_teacher or semantic_feature is None:
-            return intent_feature, None
+            return intent_feature, None, None
         if semantic_feature.ndim != 2 or semantic_feature.size(-1) != self.semantic_feature_dim:
             raise ValueError(
                 "semantic_feature must have shape [batch, semantic_feature_dim]."
@@ -579,11 +619,22 @@ class iTentformer(nn.Module):
         available = semantic_feature.float().norm(dim=-1, keepdim=True).gt(1e-6)
         semantic_latent = self.semantic_encoder(semantic_feature.float())
         semantic_latent = semantic_latent * available.to(semantic_latent.dtype)
+        if self.use_semantic_route_alignment:
+            return intent_feature, semantic_latent, available
         gate = self.semantic_fusion_gate(
             torch.cat((intent_feature, semantic_latent), dim=-1)
         )
         fused = intent_feature + self.semantic_fusion_weight * gate * semantic_latent
-        return fused, semantic_latent
+        return fused, semantic_latent, available
+
+    def _semantic_alignment_logits(self, semantic_latent, projector, embedding, available):
+        query = F.normalize(projector(semantic_latent), dim=-1, eps=1e-6)
+        keys = F.normalize(embedding.weight, dim=-1, eps=1e-6)
+        logits = torch.matmul(query, keys.T) / max(
+            self.semantic_alignment_temperature,
+            1e-6,
+        )
+        return logits * available.to(dtype=logits.dtype)
 
     def _future_mode_logits(self, history_feature):
         if not self.use_future_enhanced_intent:
@@ -941,8 +992,12 @@ class iTentformer(nn.Module):
         subroute_feature = None
         subroute_decidability_logits = None
         subroute_prob = None
+        semantic_route_logits = None
+        semantic_subroute_logits = None
+        semantic_route_gate = None
+        semantic_subroute_gate = None
         intent_feature = self._intent_feature(intent)
-        intent_feature, semantic_latent = self._fuse_semantic_feature(
+        intent_feature, semantic_latent, semantic_available = self._fuse_semantic_feature(
             intent_feature,
             semantic_feature,
         )
@@ -951,9 +1006,26 @@ class iTentformer(nn.Module):
             route_feature = intent_feature
             route_logits = self.route_head(route_feature)
             if semantic_latent is not None:
-                route_logits = route_logits + self.semantic_fusion_weight * self.semantic_route_head(
-                    semantic_latent
-                )
+                if self.use_semantic_route_alignment:
+                    semantic_route_logits = self._semantic_alignment_logits(
+                        semantic_latent,
+                        self.semantic_route_projector,
+                        self.route_embedding,
+                        semantic_available,
+                    )
+                    semantic_route_gate = self.semantic_route_reliability(
+                        torch.cat((route_feature, semantic_latent), dim=-1)
+                    ) * semantic_available.to(dtype=route_feature.dtype)
+                    route_logits = (
+                        route_logits
+                        + self.semantic_fusion_weight
+                        * semantic_route_gate
+                        * semantic_route_logits
+                    )
+                else:
+                    route_logits = route_logits + self.semantic_fusion_weight * self.semantic_route_head(
+                        semantic_latent
+                    )
             if self.use_learned_decidability:
                 route_decidability_logits = self.route_decidability_head(route_feature).squeeze(-1)
             route_prototype_prior = self._prototype_prior_logits(src, self.route_prototypes)
@@ -978,9 +1050,26 @@ class iTentformer(nn.Module):
             subroute_feature = intent_feature
             subroute_logits = self.subroute_head(subroute_feature)
             if semantic_latent is not None:
-                subroute_logits = subroute_logits + self.semantic_fusion_weight * self.semantic_subroute_head(
-                    semantic_latent
-                )
+                if self.use_semantic_subroute_alignment:
+                    semantic_subroute_logits = self._semantic_alignment_logits(
+                        semantic_latent,
+                        self.semantic_subroute_projector,
+                        self.subroute_embedding,
+                        semantic_available,
+                    )
+                    semantic_subroute_gate = self.semantic_subroute_reliability(
+                        torch.cat((subroute_feature, semantic_latent), dim=-1)
+                    ) * semantic_available.to(dtype=subroute_feature.dtype)
+                    subroute_logits = (
+                        subroute_logits
+                        + self.semantic_fusion_weight
+                        * semantic_subroute_gate
+                        * semantic_subroute_logits
+                    )
+                elif not self.use_semantic_route_alignment:
+                    subroute_logits = subroute_logits + self.semantic_fusion_weight * self.semantic_subroute_head(
+                        semantic_latent
+                    )
             future_mode_logits = self._future_mode_logits(subroute_feature)
             if future_mode_logits is not None and self.future_intent_logit_weight > 0:
                 subroute_logits = (
@@ -1029,7 +1118,7 @@ class iTentformer(nn.Module):
                 intent = intent + intent_bias
 
         if intent_only:
-            return (
+            model_output = (
                 None,
                 None,
                 route_logits,
@@ -1039,6 +1128,14 @@ class iTentformer(nn.Module):
                 route_decidability_logits,
                 subroute_decidability_logits,
             )
+            if self.use_semantic_route_alignment:
+                model_output += (
+                    semantic_route_logits,
+                    semantic_subroute_logits,
+                    semantic_route_gate,
+                    semantic_subroute_gate,
+                )
+            return model_output
 
         out, _ = self.TrajModel(src.transpose(1, 2), intent)
         if getattr(self, "use_subroute_residual_experts", False):
@@ -1056,7 +1153,7 @@ class iTentformer(nn.Module):
             ).transpose(1, 2)
 
         if self.use_route_intent_head or self.use_subroute_intent_head:
-            return (
+            model_output = (
                 out_intent,
                 out,
                 route_logits,
@@ -1066,4 +1163,12 @@ class iTentformer(nn.Module):
                 route_decidability_logits,
                 subroute_decidability_logits,
             )
+            if self.use_semantic_route_alignment:
+                model_output += (
+                    semantic_route_logits,
+                    semantic_subroute_logits,
+                    semantic_route_gate,
+                    semantic_subroute_gate,
+                )
+            return model_output
         return out_intent, out

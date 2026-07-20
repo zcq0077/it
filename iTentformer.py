@@ -1,5 +1,16 @@
 ﻿import torch
 import torch.nn as nn
+import os
+from pathlib import Path
+
+# Some Windows SciPy builds cannot create temporary files under non-ASCII user paths.
+_default_temp_dir = os.environ.get("TEMP") or os.environ.get("TMP", "")
+if os.name == "nt" and any(ord(character) > 127 for character in _default_temp_dir):
+    _process_temp_dir = Path(__file__).resolve().parent / ".tmp"
+    _process_temp_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["TEMP"] = str(_process_temp_dir)
+    os.environ["TMP"] = str(_process_temp_dir)
+
 from sklearn.model_selection import GroupShuffleSplit
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
@@ -9,7 +20,6 @@ from argparse import ArgumentParser, BooleanOptionalAction
 from collections import Counter
 from dataclasses import asdict, is_dataclass
 import importlib.util
-from pathlib import Path
 from types import ModuleType
 import hashlib
 import json
@@ -884,6 +894,34 @@ def focal_cross_entropy_loss(logits, target, class_weights=None, gamma=1.5, labe
     return focal_weight * ce_loss
 
 
+def semantic_route_reliability_target(
+        route_logits,
+        semantic_route_logits,
+        semantic_route_gate,
+        route_target,
+):
+    with torch.no_grad():
+        gate = semantic_route_gate.reshape(-1, 1)
+        motion_route_logits = (
+            route_logits
+            - args.semantic_fusion_weight * gate * semantic_route_logits
+        )
+        motion_loss = F.cross_entropy(
+            motion_route_logits,
+            route_target.long(),
+            reduction="none",
+        )
+        semantic_loss = F.cross_entropy(
+            semantic_route_logits,
+            route_target.long(),
+            reduction="none",
+        )
+        return torch.sigmoid(
+            (motion_loss - semantic_loss)
+            / max(float(args.semantic_reliability_temperature), 1e-6)
+        )
+
+
 def compute_intent_objective(
         route_logits=None,
         route_target=None,
@@ -894,6 +932,10 @@ def compute_intent_objective(
         subroute_feature=None,
         subroute_decidability=None,
         subroute_decidability_logits=None,
+        semantic_route_logits=None,
+        semantic_subroute_logits=None,
+        semantic_route_gate=None,
+        semantic_available=None,
         use_class_weights=True,
 ):
     reference = next(
@@ -904,6 +946,9 @@ def compute_intent_objective(
                 subroute_feature,
                 route_decidability_logits,
                 subroute_decidability_logits,
+                semantic_route_logits,
+                semantic_subroute_logits,
+                semantic_route_gate,
             )
             if item is not None
         ),
@@ -961,6 +1006,45 @@ def compute_intent_objective(
                 route_decidability_target.reshape(-1),
             )
             loss = loss + args.route_decidability_loss_weight * route_decidability_loss
+
+        if (
+                args.use_semantic_route_alignment
+                and semantic_route_logits is not None
+                and args.semantic_route_alignment_weight > 0
+        ):
+            semantic_route_loss_values = F.cross_entropy(
+                semantic_route_logits,
+                route_target.long(),
+                reduction="none",
+            )
+            semantic_route_loss = weighted_loss_mean(
+                semantic_route_loss_values,
+                semantic_available,
+            )
+            loss = loss + args.semantic_route_alignment_weight * semantic_route_loss
+
+        if (
+                args.use_semantic_route_alignment
+                and semantic_route_logits is not None
+                and semantic_route_gate is not None
+                and args.semantic_route_reliability_weight > 0
+        ):
+            reliability_target = semantic_route_reliability_target(
+                route_logits,
+                semantic_route_logits,
+                semantic_route_gate,
+                route_target,
+            )
+            reliability_loss_values = F.binary_cross_entropy(
+                semantic_route_gate.reshape(-1).clamp(1e-6, 1.0 - 1e-6),
+                reliability_target,
+                reduction="none",
+            )
+            reliability_loss = weighted_loss_mean(
+                reliability_loss_values,
+                semantic_available,
+            )
+            loss = loss + args.semantic_route_reliability_weight * reliability_loss
 
     if args.use_subroute_intent_head and subroute_logits is not None and subroute_target is not None:
         class_weights = (
@@ -1050,6 +1134,22 @@ def compute_intent_objective(
             )
             loss = loss + args.subroute_decidability_loss_weight * subroute_decidability_loss
 
+        if (
+                args.use_semantic_subroute_alignment
+                and semantic_subroute_logits is not None
+                and args.semantic_subroute_alignment_weight > 0
+        ):
+            semantic_subroute_loss_values = F.cross_entropy(
+                semantic_subroute_logits,
+                subroute_target.long(),
+                reduction="none",
+            )
+            semantic_subroute_loss = weighted_loss_mean(
+                semantic_subroute_loss_values,
+                semantic_available,
+            )
+            loss = loss + args.semantic_subroute_alignment_weight * semantic_subroute_loss
+
     return loss
 
 
@@ -1067,6 +1167,10 @@ def compute_objective(
         subroute_feature=None,
         subroute_decidability=None,
         subroute_decidability_logits=None,
+        semantic_route_logits=None,
+        semantic_subroute_logits=None,
+        semantic_route_gate=None,
+        semantic_available=None,
 ):
     mse_loss = criterion1(value_output, value_target)
     intent = intent.reshape(-1, intent.size(-1))
@@ -1110,6 +1214,10 @@ def compute_objective(
         subroute_feature=subroute_feature,
         subroute_decidability=subroute_decidability,
         subroute_decidability_logits=subroute_decidability_logits,
+        semantic_route_logits=semantic_route_logits,
+        semantic_subroute_logits=semantic_subroute_logits,
+        semantic_route_gate=semantic_route_gate,
+        semantic_available=semantic_available,
     )
 
     return loss
@@ -1496,6 +1604,18 @@ def unpack_model_output(model_output):
     if len(model_output) == 6:
         return (*model_output, None, None)
     return tuple(model_output[:8])
+
+
+def unpack_semantic_model_output(model_output):
+    if len(model_output) < 12:
+        return None, None, None, None
+    return tuple(model_output[8:12])
+
+
+def semantic_availability(semantic_feature):
+    if semantic_feature is None:
+        return None
+    return semantic_feature.float().norm(dim=-1).gt(1e-6)
 
 
 def choose_plot_indices(window_labels, max_samples, strategy, seed):
@@ -1999,6 +2119,16 @@ def evaluate(
     candidate_oracle_fde_sum = 0.0
     candidate_branch_switch_count = 0
     candidate_branch_switch_correct = 0
+    semantic_route_correct = 0
+    semantic_route_total = 0
+    semantic_route_gate_sum = 0.0
+    semantic_route_gate_total = 0
+    semantic_route_target_sum = 0.0
+    semantic_route_gate_error_sum = 0.0
+    semantic_subroute_correct = 0
+    semantic_subroute_total = 0
+    semantic_subroute_gate_sum = 0.0
+    semantic_subroute_gate_total = 0
     with torch.no_grad():
         for idx in range(0, len(eval_idx_list), batch_size):
             batch_indices = eval_idx_list[idx:idx + batch_size]
@@ -2025,6 +2155,7 @@ def evaluate(
                 None if voyage_contexts is None else voyage_contexts[batch_indices]
             )
 
+            model_output = model(delta, src, semantic_feature=semantic_feature)
             (
                 intent,
                 raw_output,
@@ -2034,9 +2165,14 @@ def evaluate(
                 subroute_feature,
                 route_decidability_logits,
                 subroute_decidability_logits,
-            ) = unpack_model_output(
-                model(delta, src, semantic_feature=semantic_feature)
-            )
+            ) = unpack_model_output(model_output)
+            (
+                semantic_route_logits,
+                semantic_subroute_logits,
+                semantic_route_gate,
+                semantic_subroute_gate,
+            ) = unpack_semantic_model_output(model_output)
+            semantic_available = semantic_availability(semantic_feature)
             value_output = compose_value_output(raw_output, src)
             value_target = tgt_y
 
@@ -2108,6 +2244,10 @@ def evaluate(
                 subroute_feature=subroute_feature,
                 subroute_decidability=batch_decidability,
                 subroute_decidability_logits=subroute_decidability_logits,
+                semantic_route_logits=semantic_route_logits,
+                semantic_subroute_logits=semantic_subroute_logits,
+                semantic_route_gate=semantic_route_gate,
+                semantic_available=semantic_available,
             )
             if selector_loss is not None:
                 loss = (
@@ -2115,6 +2255,44 @@ def evaluate(
                     + args.candidate_selector_weight * selector_loss
                     + args.candidate_trajectory_weight * best_candidate_cost
                 )
+            if semantic_available is not None:
+                semantic_mask = semantic_available.bool()
+                if semantic_route_logits is not None and route_target is not None:
+                    semantic_route_pred = semantic_route_logits.argmax(dim=-1)
+                    semantic_route_correct += int(
+                        (semantic_route_pred.eq(route_target) & semantic_mask).sum().item()
+                    )
+                    semantic_route_total += int(semantic_mask.sum().item())
+                    if semantic_route_gate is not None:
+                        route_gate_values = semantic_route_gate.reshape(-1)
+                        semantic_route_gate_sum += float(route_gate_values[semantic_mask].sum().item())
+                        semantic_route_gate_total += int(semantic_mask.sum().item())
+                        reliability_target = semantic_route_reliability_target(
+                            route_logits,
+                            semantic_route_logits,
+                            semantic_route_gate,
+                            route_target,
+                        )
+                        semantic_route_target_sum += float(
+                            reliability_target[semantic_mask].sum().item()
+                        )
+                        semantic_route_gate_error_sum += float(
+                            torch.abs(
+                                route_gate_values[semantic_mask]
+                                - reliability_target[semantic_mask]
+                            ).sum().item()
+                        )
+                if semantic_subroute_logits is not None and subroute_target is not None:
+                    semantic_subroute_pred = semantic_subroute_logits.argmax(dim=-1)
+                    semantic_subroute_correct += int(
+                        (semantic_subroute_pred.eq(subroute_target) & semantic_mask).sum().item()
+                    )
+                    semantic_subroute_total += int(semantic_mask.sum().item())
+                    if semantic_subroute_gate is not None:
+                        semantic_subroute_gate_sum += float(
+                            semantic_subroute_gate.reshape(-1)[semantic_mask].sum().item()
+                        )
+                        semantic_subroute_gate_total += int(semantic_mask.sum().item())
             if route_logits is not None and route_target is not None:
                 route_pred = torch.argmax(route_logits, dim=-1)
                 update_routing_stats(
@@ -2259,6 +2437,29 @@ def evaluate(
             )
             print(" Candidate_Selector: " + candidate_detail)
             logging.getLogger().info("%s Candidate_Selector: %s", name, candidate_detail)
+        if semantic_route_total > 0 or semantic_subroute_total > 0:
+            semantic_parts = []
+            if semantic_route_total > 0:
+                semantic_parts.append(
+                    f"route_acc {100.0 * semantic_route_correct / semantic_route_total:.1f}%"
+                )
+            if semantic_route_gate_total > 0:
+                semantic_parts.append(
+                    f"route_gate {semantic_route_gate_sum / semantic_route_gate_total:.3f}"
+                    f"/target {semantic_route_target_sum / semantic_route_gate_total:.3f}"
+                    f"/MAE {semantic_route_gate_error_sum / semantic_route_gate_total:.3f}"
+                )
+            if semantic_subroute_total > 0:
+                semantic_parts.append(
+                    f"subroute_acc {100.0 * semantic_subroute_correct / semantic_subroute_total:.1f}%"
+                )
+            if semantic_subroute_gate_total > 0:
+                semantic_parts.append(
+                    f"subroute_gate {semantic_subroute_gate_sum / semantic_subroute_gate_total:.3f}"
+                )
+            semantic_detail = ", ".join(semantic_parts)
+            print(" Semantic_Evidence: " + semantic_detail)
+            logging.getLogger().info("%s Semantic_Evidence: %s", name, semantic_detail)
         if route_total > 0:
             print(" Route_ACC: {:.2f}%".format(100.0 * route_correct / route_total))
             if route_decidability is not None:
@@ -2434,9 +2635,11 @@ def train(ep, parallel_train=False):
             None if X_train_subroute_decidability is None
             else X_train_subroute_decidability[batch_indices].to(device)
         )
-        aux_semantic_feature = semantic_features_for_contexts(
-            None if X_train_contexts is None else X_train_contexts[batch_indices]
-        )
+        aux_semantic_feature = None
+        if args.use_semantic_in_balanced_intent_stream:
+            aux_semantic_feature = semantic_features_for_contexts(
+                None if X_train_contexts is None else X_train_contexts[batch_indices]
+            )
 
         optimizer.zero_grad()
         (
@@ -2529,6 +2732,16 @@ def train(ep, parallel_train=False):
             None if X_train_contexts is None else X_train_contexts[batch_indices]
         )
 
+        model_output = model(
+            delta,
+            src,
+            semantic_feature=semantic_feature,
+            route_target=route_target,
+            subroute_target=subroute_target,
+            teacher_forcing_ratio=teacher_forcing_ratio,
+            route_supervision_weight=batch_route_decidability,
+            subroute_supervision_weight=branch_decidability,
+        )
         (
             intent,
             raw_output,
@@ -2538,18 +2751,14 @@ def train(ep, parallel_train=False):
             subroute_feature,
             route_decidability_logits,
             subroute_decidability_logits,
-        ) = unpack_model_output(
-            model(
-                delta,
-                src,
-                semantic_feature=semantic_feature,
-                route_target=route_target,
-                subroute_target=subroute_target,
-                teacher_forcing_ratio=teacher_forcing_ratio,
-                route_supervision_weight=batch_route_decidability,
-                subroute_supervision_weight=branch_decidability,
-            )
-        )
+        ) = unpack_model_output(model_output)
+        (
+            semantic_route_logits,
+            semantic_subroute_logits,
+            semantic_route_gate,
+            _,
+        ) = unpack_semantic_model_output(model_output)
+        semantic_available = semantic_availability(semantic_feature)
 
         value_output = compose_value_output(raw_output, src)
         value_target = tgt_y
@@ -2568,6 +2777,10 @@ def train(ep, parallel_train=False):
             subroute_feature=subroute_feature,
             subroute_decidability=batch_decidability,
             subroute_decidability_logits=subroute_decidability_logits,
+            semantic_route_logits=semantic_route_logits,
+            semantic_subroute_logits=semantic_subroute_logits,
+            semantic_route_gate=semantic_route_gate,
+            semantic_available=semantic_available,
         )
         future_loss, future_stats = future_teacher_objective(
             subroute_feature,
@@ -2740,6 +2953,14 @@ if __name__ == '__main__':
     parser.add_argument("--semantic_hidden_dim", type=int, default=128)
     parser.add_argument("--semantic_fusion_weight", type=float, default=0.25)
     parser.add_argument("--semantic_dropout", type=float, default=0.15)
+    parser.add_argument("--use_semantic_route_alignment", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--use_semantic_subroute_alignment", action=BooleanOptionalAction, default=False)
+    parser.add_argument("--semantic_alignment_temperature", type=float, default=0.20)
+    parser.add_argument("--semantic_route_alignment_weight", type=float, default=0.10)
+    parser.add_argument("--semantic_subroute_alignment_weight", type=float, default=0.05)
+    parser.add_argument("--semantic_route_reliability_weight", type=float, default=0.05)
+    parser.add_argument("--semantic_reliability_temperature", type=float, default=0.50)
+    parser.add_argument("--use_semantic_in_balanced_intent_stream", action=BooleanOptionalAction, default=False)
     parser.add_argument("--test_ratio", type=float, default=0.20)
     parser.add_argument("--split_seed", type=int, default=42)
     parser.add_argument("--train_seed", type=int, default=42)
@@ -2931,6 +3152,26 @@ if __name__ == '__main__':
         raise ValueError("--semantic_fusion_weight must be non-negative.")
     if not 0 <= args.semantic_dropout < 1:
         raise ValueError("--semantic_dropout must be in [0, 1).")
+    if args.use_semantic_route_alignment and not args.use_qwen_semantic_teacher:
+        raise ValueError("--use_semantic_route_alignment requires --use_qwen_semantic_teacher.")
+    if args.use_semantic_subroute_alignment and not args.use_semantic_route_alignment:
+        raise ValueError(
+            "--use_semantic_subroute_alignment requires --use_semantic_route_alignment."
+        )
+    if args.semantic_alignment_temperature <= 0:
+        raise ValueError("--semantic_alignment_temperature must be positive.")
+    if args.semantic_route_alignment_weight < 0:
+        raise ValueError("--semantic_route_alignment_weight must be non-negative.")
+    if args.semantic_subroute_alignment_weight < 0:
+        raise ValueError("--semantic_subroute_alignment_weight must be non-negative.")
+    if args.semantic_route_reliability_weight < 0:
+        raise ValueError("--semantic_route_reliability_weight must be non-negative.")
+    if args.semantic_reliability_temperature <= 0:
+        raise ValueError("--semantic_reliability_temperature must be positive.")
+    if args.use_semantic_in_balanced_intent_stream and not args.use_qwen_semantic_teacher:
+        raise ValueError(
+            "--use_semantic_in_balanced_intent_stream requires --use_qwen_semantic_teacher."
+        )
     input_length = int(args.input_length)
     target_length = int(args.target_length)
     if args.geo_loss_scale <= 0:
@@ -2963,6 +3204,14 @@ if __name__ == '__main__':
         raise ValueError("--hierarchical_mask_strength must be non-negative.")
     if args.use_subroute_embedding and not args.use_subroute_intent_head:
         raise ValueError("--use_subroute_embedding requires --use_subroute_intent_head.")
+    if args.use_semantic_route_alignment and not args.use_route_embedding:
+        raise ValueError(
+            "--use_semantic_route_alignment requires the route embedding."
+        )
+    if args.use_semantic_subroute_alignment and not args.use_subroute_embedding:
+        raise ValueError(
+            "--use_semantic_subroute_alignment requires the subroute embedding."
+        )
     if args.use_subroute_contrastive_loss and not args.use_subroute_intent_head:
         raise ValueError("--use_subroute_contrastive_loss requires --use_subroute_intent_head.")
     if args.use_subroute_focal_loss and not args.use_subroute_intent_head:
@@ -3186,14 +3435,24 @@ if __name__ == '__main__':
         args.hierarchical_mask_strength,
     )
     logger.info(
-        "Qwen semantic teacher: enabled=%s, sidecar=%s, hidden=%d, "
-        "fusion_weight=%.3f, dropout=%.2f; embeddings are label-free and trained "
-        "with the main selector inside the fixed training run.",
+        "Qwen semantic evidence: enabled=%s, sidecar=%s, hidden=%d, "
+        "route_alignment=%s, subroute_alignment=%s, temp=%.3f, "
+        "route_w=%.3f, subroute_w=%.3f, reliability_w=%.3f, "
+        "reliability_temp=%.3f, fusion_weight=%.3f, dropout=%.2f, "
+        "balanced_stream=%s; the frozen sidecar is label-free.",
         args.use_qwen_semantic_teacher,
         args.qwen_semantic_path,
         args.semantic_hidden_dim,
+        args.use_semantic_route_alignment,
+        args.use_semantic_subroute_alignment,
+        args.semantic_alignment_temperature,
+        args.semantic_route_alignment_weight,
+        args.semantic_subroute_alignment_weight,
+        args.semantic_route_reliability_weight,
+        args.semantic_reliability_temperature,
         args.semantic_fusion_weight,
         args.semantic_dropout,
+        args.use_semantic_in_balanced_intent_stream,
     )
     logger.info(
         "Subroute switches: labels=%s, head=%s(w=%.3f), embedding=%s(dim=%d), "
@@ -3417,12 +3676,13 @@ if __name__ == '__main__':
         )
     if qwen_semantic_payload is not None:
         logger.info(
-            "Qwen semantic teacher loaded from %s, model=%s, contexts=%d, "
-            "embedding_dim=%d, label_free=%s, fusion_weight=%.3f.",
+            "Qwen semantic evidence loaded from %s, model=%s, contexts=%d, "
+            "embedding_dim=%d, pooling=%s, label_free=%s, fusion_weight=%.3f.",
             args.qwen_semantic_path,
             qwen_semantic_payload.get("model_path"),
             qwen_semantic_payload.get("text_count"),
             semantic_feature_dim,
+            qwen_semantic_payload.get("pooling"),
             qwen_semantic_payload.get("label_free"),
             args.semantic_fusion_weight,
         )
@@ -4043,17 +4303,20 @@ if __name__ == '__main__':
                               candidate_base_prior_bias=args.candidate_base_prior_bias,
                               use_semantic_teacher=args.use_qwen_semantic_teacher,
                               semantic_feature_dim=semantic_feature_dim,
-                               semantic_hidden_dim=args.semantic_hidden_dim,
-                               semantic_fusion_weight=args.semantic_fusion_weight,
-                               semantic_dropout=args.semantic_dropout,
-                               use_future_enhanced_intent=args.use_future_enhanced_intent,
-                               future_intent_dim=args.future_intent_dim,
-                               future_intent_temperature=args.future_intent_temperature,
-                               future_intent_logit_weight=args.future_intent_logit_weight,
-                               use_subroute_residual_experts=args.use_subroute_residual_experts,
-                               subroute_residual_hidden_dim=args.subroute_residual_hidden_dim,
-                               subroute_residual_scale=args.subroute_residual_scale,
-                               subroute_residual_dropout=args.subroute_residual_dropout).to(device)
+                              semantic_hidden_dim=args.semantic_hidden_dim,
+                              semantic_fusion_weight=args.semantic_fusion_weight,
+                              semantic_dropout=args.semantic_dropout,
+                              use_semantic_route_alignment=args.use_semantic_route_alignment,
+                              use_semantic_subroute_alignment=args.use_semantic_subroute_alignment,
+                              semantic_alignment_temperature=args.semantic_alignment_temperature,
+                              use_future_enhanced_intent=args.use_future_enhanced_intent,
+                              future_intent_dim=args.future_intent_dim,
+                              future_intent_temperature=args.future_intent_temperature,
+                              future_intent_logit_weight=args.future_intent_logit_weight,
+                              use_subroute_residual_experts=args.use_subroute_residual_experts,
+                              subroute_residual_hidden_dim=args.subroute_residual_hidden_dim,
+                              subroute_residual_scale=args.subroute_residual_scale,
+                              subroute_residual_dropout=args.subroute_residual_dropout).to(device)
         awl = AutomaticWeightedLoss(2).cuda()
         model_logger.info("number of parameters: %.6e", count_parameters(model))
         model_logger.info("number of AWL parameters: %.6e", count_parameters(awl))

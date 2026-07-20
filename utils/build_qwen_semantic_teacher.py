@@ -9,7 +9,16 @@ from argparse import ArgumentParser
 from pathlib import Path
 import hashlib
 import json
+import os
 import re
+
+# Keep SciPy/Transformers temporary files on an ASCII-only path on Windows.
+_default_temp_dir = os.environ.get("TEMP") or os.environ.get("TMP", "")
+if os.name == "nt" and any(ord(character) > 127 for character in _default_temp_dir):
+    _process_temp_dir = Path(__file__).resolve().parents[1] / ".tmp"
+    _process_temp_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["TEMP"] = str(_process_temp_dir)
+    os.environ["TMP"] = str(_process_temp_dir)
 
 import torch
 import torch.nn.functional as F
@@ -19,9 +28,9 @@ from transformers import AutoModel, AutoTokenizer
 
 
 SEMANTIC_INSTRUCTION = (
-    "Encode this observed AIS voyage context for vessel route-intent prediction. "
-    "Focus on the canonical destination, vessel and cargo constraints, draught, "
-    "ETA, and navigational status. Do not infer or invent a future route."
+    "Represent the observed AIS voyage context for hierarchical vessel route-intent "
+    "matching. Focus on destination identity and aliases, vessel constraints, draught, "
+    "ETA, and navigational status; do not predict coordinates."
 )
 
 
@@ -52,10 +61,19 @@ def semantic_text(context):
         return "AIS voyage context unavailable at forecast time."
     destination = extract_field(context, "destination", "ETA")
     return (
-        f"{SEMANTIC_INSTRUCTION}\n"
-        f"Canonical destination key: {canonical_destination(destination)}.\n"
+        f"Instruct: {SEMANTIC_INSTRUCTION}\n"
+        f"Query:Canonical destination key: {canonical_destination(destination)}. "
         f"Observed context: {context}"
     )
+
+
+def last_token_pool(last_hidden_state, attention_mask):
+    left_padded = bool(attention_mask[:, -1].sum().item() == attention_mask.size(0))
+    if left_padded:
+        return last_hidden_state[:, -1]
+    sequence_lengths = attention_mask.sum(dim=1) - 1
+    batch_indices = torch.arange(last_hidden_state.size(0), device=last_hidden_state.device)
+    return last_hidden_state[batch_indices, sequence_lengths]
 
 
 def resolve_dtype(name, device):
@@ -81,6 +99,11 @@ def main():
         default="auto",
     )
     parser.add_argument("--max_contexts", type=int, default=0)
+    parser.add_argument(
+        "--pooling",
+        choices=["auto", "last_token", "masked_mean"],
+        default="auto",
+    )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -102,7 +125,15 @@ def main():
         "cpu" if args.device == "auto" else args.device
     )
     dtype = resolve_dtype(args.dtype, device)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=True)
+    model_path_lower = str(args.model_path).lower()
+    pooling = args.pooling
+    if pooling == "auto":
+        pooling = "last_token" if "embedding" in model_path_lower else "masked_mean"
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_path,
+        use_fast=True,
+        padding_side="left" if pooling == "last_token" else "right",
+    )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModel.from_pretrained(
@@ -127,8 +158,11 @@ def main():
             )
             encoded = {key: value.to(device) for key, value in encoded.items()}
             hidden = model(**encoded, use_cache=False, return_dict=True).last_hidden_state.float()
-            mask = encoded["attention_mask"].unsqueeze(-1).to(hidden.dtype)
-            pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
+            if pooling == "last_token":
+                pooled = last_token_pool(hidden, encoded["attention_mask"])
+            else:
+                mask = encoded["attention_mask"].unsqueeze(-1).to(hidden.dtype)
+                pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
             pooled = F.normalize(pooled, dim=-1)
             rows.append(pooled.cpu().to(torch.float16).numpy())
             print(f"Encoded {end}/{len(text_pool)} contexts", flush=True)
@@ -145,7 +179,8 @@ def main():
         "text_count": len(text_pool),
         "embedding_dim": int(embeddings.shape[1]),
         "max_length": int(args.max_length),
-        "pooling": "masked_mean_l2_normalized",
+        "pooling": f"{pooling}_l2_normalized",
+        "instruction": SEMANTIC_INSTRUCTION,
         "canonical_destination": "uppercase_alnum",
         "label_free": True,
         "embeddings": embeddings,

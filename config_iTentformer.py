@@ -34,14 +34,26 @@ class Config:
     # 侧车只保存每个历史时刻之前最后已知的船型、吃水、Destination等语义信息。
     voyage_context_path = "dataset/dma_raw_2023_06_07_08_plus_09_10_oa_s00/dma_2023_06_07_08_plus_09_10_oa_s00_target350_voyage_context.pkl"
 
-    # 千问语义教师：该侧车只包含预测时刻之前航次文本的冻结向量，
+    # Qwen3-Embedding语义证据：侧车只包含预测时刻之前航次文本的冻结向量，
     # 不读取航路标签和真实未来，因此可以安全地跨不同固定划分复用。
-    # 先运行 utils/build_qwen_semantic_teacher.py 生成该文件。
+    # Qwen不直接预测坐标；它只给层级航路意图提供可学习、可门控的语义先验。
     use_qwen_semantic_teacher = True
-    qwen_semantic_path = "dataset/dma_raw_2023_06_07_08_plus_09_10_oa_s00/dma_2023_06_07_08_plus_09_10_oa_s00_target350_qwen_semantic.pkl"
+    qwen_semantic_path = "dataset/dma_raw_2023_06_07_08_plus_09_10_oa_s00/dma_2023_06_07_08_plus_09_10_oa_s00_target350_qwen3_embedding_0p6b.pkl"
     semantic_hidden_dim = 128
-    # 语义仅作为温和软先验，避免错误Destination压过历史轨迹。
-    semantic_fusion_weight = 0.25
+    # Qwen只与后续解码器共用的Route Embedding做余弦对齐。
+    # 子航路不直接接收文本logits，而是通过主航路后验和层级约束间接受益。
+    use_semantic_route_alignment = True
+    use_semantic_subroute_alignment = False
+    semantic_alignment_temperature = 0.20
+    semantic_route_alignment_weight = 0.05
+    semantic_subroute_alignment_weight = 0.0
+    # 可靠性目标比较语义证据与非语义证据的逐样本分类损失。
+    semantic_route_reliability_weight = 0.05
+    semantic_reliability_temperature = 0.50
+    # 类别均衡辅助流只训练运动意图，避免重采样改变Qwen语义先验的自然分布。
+    use_semantic_in_balanced_intent_stream = False
+    # 对齐后的语义logits只作为温和残差证据，错误Destination时可由门控关闭。
+    semantic_fusion_weight = 0.10
     semantic_dropout = 0.20
 
     # 固定传统划分：按MMSI分组，约70%训练、10%验证、20%测试，只训练一次。
@@ -272,10 +284,9 @@ class Config:
     # 2. 实验输出位置
     # ======================================================================
     # 简短实验代号，同时用于模型文件和自动生成的结果目录。
-    # 当前含义：DMA、v15通用子航路专家、历史/预测均为3小时。
-    # 模型文件：save_models/dma_v15e_3h_fixed.pt
-    # 结果目录：results/dma_v15e_3h-年月日-时分秒/
-    model_prefix = "dma_v15e_3h"
+    # 当前含义：DMA、v17 Qwen主航路语义先验、历史/预测均为3小时。
+    # 使用新前缀，保留已停止的dma_v16q_3h实验作为双层语义对齐对照。
+    model_prefix = "dma_v17qr_3h"
 
     # 模型 checkpoint 保存目录。
     model_dir = "save_models"
