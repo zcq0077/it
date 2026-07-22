@@ -1,0 +1,241 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 2048 1152" role="img" aria-labelledby="vfr-title vfr-desc" xmlns="http://www.w3.org/2000/svg" width="2048" height="1152">
+    <title id="vfr-title">输入流向校正后的语义增强层级航路意图船舶轨迹预测框架</title>
+    <desc id="vfr-desc">明确绘制局部运动、语义向量、融合特征、航路概率与候选轨迹在各大模块之间的分支和传递。</desc>
+    <defs><style>html,body{margin:0;width:2048px;height:1152px;overflow:hidden}#vessel-framework-explicit-intent-flow{width:2048px;height:1152px}</style>
+      <marker id="vr-b" markerWidth="8" markerHeight="8" refX="7.2" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L8 4 L0 8 Z" fill="#216fa6"></path></marker>
+      <marker id="vr-t" markerWidth="8" markerHeight="8" refX="7.2" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L8 4 L0 8 Z" fill="#0f8777"></path></marker>
+      <marker id="vr-g" markerWidth="8" markerHeight="8" refX="7.2" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L8 4 L0 8 Z" fill="#37804d"></path></marker>
+      <marker id="vr-o" markerWidth="8" markerHeight="8" refX="7.2" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L8 4 L0 8 Z" fill="#bf741b"></path></marker>
+      <marker id="vr-x" markerWidth="8" markerHeight="8" refX="7.2" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L8 4 L0 8 Z" fill="#5a6873"></path></marker>
+      <marker id="vr-r" markerWidth="8" markerHeight="8" refX="7.2" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L8 4 L0 8 Z" fill="#982e39"></path></marker>
+    </defs>
+    <rect x="0" y="0" width="2048" height="1152" fill="#ffffff"></rect>
+
+    <!-- Stage headings and separators -->
+    <text x="34" y="38" class="stage-no">STAGE 1</text><text x="34" y="68" class="stage-title">多源输入</text><line x1="34" y1="88" x2="250" y2="88" stroke="#8d99a2" stroke-width="1.3"></line>
+    <text x="280" y="38" class="stage-no">STAGE 2</text><text x="280" y="68" class="stage-title">全局/局部运动与语义编码</text><line x1="280" y1="88" x2="718" y2="88" stroke="#4d96c9" stroke-width="1.3"></line>
+    <text x="742" y="38" class="stage-no">STAGE 3</text><text x="742" y="68" class="stage-title">语义增强的层级航路意图</text><line x1="742" y1="88" x2="1298" y2="88" stroke="#6eaa7d" stroke-width="1.3"></line>
+    <text x="1322" y="38" class="stage-no">STAGE 4</text><text x="1322" y="68" class="stage-title">航路条件多候选轨迹生成</text><line x1="1322" y1="88" x2="1708" y2="88" stroke="#d39a54" stroke-width="1.3"></line>
+    <text x="1732" y="38" class="stage-no">STAGE 5</text><text x="1732" y="68" class="stage-title">候选选择与输出</text><line x1="1732" y1="88" x2="2016" y2="88" stroke="#8d99a2" stroke-width="1.3"></line>
+    <line x1="265" y1="108" x2="265" y2="875" stroke="#d6dce1" stroke-width="1.1" stroke-dasharray="5 7"></line>
+    <line x1="730" y1="108" x2="730" y2="875" stroke="#d6dce1" stroke-width="1.1" stroke-dasharray="5 7"></line>
+    <line x1="1310" y1="108" x2="1310" y2="875" stroke="#d6dce1" stroke-width="1.1" stroke-dasharray="5 7"></line>
+    <line x1="1720" y1="108" x2="1720" y2="875" stroke="#d6dce1" stroke-width="1.1" stroke-dasharray="5 7"></line>
+
+    <!-- Stage 1 -->
+    <g>
+      <rect x="42" y="230" width="205" height="230" rx="4" fill="#f5f9fc" stroke="#216fa6" stroke-width="1.7"></rect><rect x="42" y="230" width="7" height="230" fill="#216fa6"></rect>
+      <text x="144.5" y="261" text-anchor="middle" class="group-title">历史 AIS 轨迹</text><text x="144.5" y="285" text-anchor="middle" class="tensor">X<tspan baseline-shift="sub" font-size="9">AIS</tspan> ∈ R<tspan baseline-shift="super" font-size="9">13×F</tspan></text>
+      <rect x="69" y="310" width="151" height="90" fill="#ffffff" stroke="#7baad0"></rect>
+      <line x1="69" y1="332" x2="220" y2="332" stroke="#abc8dd"></line><line x1="69" y1="354" x2="220" y2="354" stroke="#abc8dd"></line><line x1="69" y1="376" x2="220" y2="376" stroke="#abc8dd"></line>
+      <line x1="107" y1="310" x2="107" y2="400" stroke="#abc8dd"></line><line x1="145" y1="310" x2="145" y2="400" stroke="#abc8dd"></line><line x1="183" y1="310" x2="183" y2="400" stroke="#abc8dd"></line>
+      <text x="88" y="326" text-anchor="middle" class="tiny">lon</text><text x="126" y="326" text-anchor="middle" class="tiny">lat</text><text x="164" y="326" text-anchor="middle" class="tiny">SOG</text><text x="201" y="326" text-anchor="middle" class="tiny">COG</text>
+      <text x="145" y="348" text-anchor="middle" class="tiny">运动状态序列</text><text x="145" y="370" text-anchor="middle" class="tiny">···</text><text x="145" y="392" text-anchor="middle" class="tiny">对应变化量 ΔX</text>
+      <text x="144.5" y="426" text-anchor="middle" class="note">过去3小时 · 13个观测点</text><text x="144.5" y="447" text-anchor="middle" class="note">15分钟采样间隔</text>
+
+      <rect x="42" y="590" width="205" height="170" rx="4" fill="#f3faf8" stroke="#0f8777" stroke-width="1.7"></rect><rect x="42" y="590" width="7" height="170" fill="#0f8777"></rect>
+      <text x="144.5" y="621" text-anchor="middle" class="group-title">航次语义信息</text><text x="144.5" y="646" text-anchor="middle" class="tensor">c = {type, draught, dest., nav.}</text>
+      <rect x="65" y="670" width="70" height="28" rx="2" fill="#ffffff" stroke="#74b9ad"></rect><rect x="154" y="670" width="70" height="28" rx="2" fill="#ffffff" stroke="#74b9ad"></rect>
+      <rect x="65" y="710" width="70" height="28" rx="2" fill="#ffffff" stroke="#74b9ad"></rect><rect x="154" y="710" width="70" height="28" rx="2" fill="#ffffff" stroke="#74b9ad"></rect>
+      <text x="100" y="688" text-anchor="middle" class="tiny">船型</text><text x="189" y="688" text-anchor="middle" class="tiny">吃水</text><text x="100" y="728" text-anchor="middle" class="tiny">Destination</text><text x="189" y="728" text-anchor="middle" class="tiny">航行状态</text>
+      <text x="144.5" y="751" text-anchor="middle" class="tiny">预测时刻前可见</text>
+    </g>
+
+    <!-- Stage 2: motion encoder -->
+    <g>
+      <rect x="285" y="140" width="425" height="430" rx="4" fill="#ffffff" stroke="#82b4d7" stroke-width="1.5"></rect><rect x="285" y="140" width="425" height="42" rx="4" fill="#e8f2f9"></rect>
+      <text x="497.5" y="167" text-anchor="middle" class="group-title">全局/局部双分支运动编码器</text>
+
+      <rect x="306" y="205" width="383" height="132" rx="3" fill="#f8fbfd" stroke="#216fa6" stroke-width="1.3"></rect><text x="323" y="228" class="module-title">全局变量关系支路</text>
+      <rect x="323" y="251" width="76" height="43" rx="2" fill="#edf5fa" stroke="#216fa6"></rect><text x="361" y="269" text-anchor="middle" class="tiny">输入映射</text><text x="361" y="285" text-anchor="middle" class="tiny">Linear</text>
+      <circle cx="426" cy="272.5" r="17" fill="#ffffff" stroke="#216fa6" stroke-width="1.3"></circle><text x="426" y="279" text-anchor="middle" class="op">⊕</text><text x="426" y="307" text-anchor="middle" class="tiny">位置编码 PE</text>
+      <rect x="464" y="239" width="126" height="68" rx="2" fill="#edf5fa" stroke="#216fa6"></rect><text x="527" y="261" text-anchor="middle" class="module-title">Variate Transformer</text><text x="527" y="280" text-anchor="middle" class="tiny">MHA → Add&amp;Norm</text><text x="527" y="297" text-anchor="middle" class="tiny">FFN → Add&amp;Norm</text>
+      <rect x="617" y="251" width="52" height="43" rx="2" fill="#edf5fa" stroke="#216fa6"></rect><text x="643" y="269" text-anchor="middle" class="tiny">FC</text><text x="643" y="285" text-anchor="middle" class="tiny">映射</text>
+      <path d="M399 272.5 H409" class="ab"></path><path d="M443 272.5 H464" class="ab"></path><path d="M590 272.5 H617" class="ab"></path>
+
+      <rect x="306" y="365" width="383" height="177" rx="3" fill="#f8fbfd" stroke="#216fa6" stroke-width="1.3"></rect><text x="323" y="388" class="module-title">局部行为支路（TCN）</text>
+      <rect x="323" y="417" width="76" height="48" rx="2" fill="#edf5fa" stroke="#216fa6"></rect><text x="361" y="436" text-anchor="middle" class="tiny">Dilated Conv</text><text x="361" y="453" text-anchor="middle" class="tiny">d = 2<tspan baseline-shift="super" font-size="8">m</tspan></text>
+      <rect x="420" y="417" width="67" height="48" rx="2" fill="#edf5fa" stroke="#216fa6"></rect><text x="453.5" y="436" text-anchor="middle" class="tiny">ReLU</text><text x="453.5" y="453" text-anchor="middle" class="tiny">Dropout</text>
+      <rect x="508" y="417" width="78" height="48" rx="2" fill="#edf5fa" stroke="#216fa6"></rect><text x="547" y="436" text-anchor="middle" class="tiny">Dilated Conv</text><text x="547" y="453" text-anchor="middle" class="tiny">+ SE</text>
+      <circle cx="624" cy="441" r="17" fill="#ffffff" stroke="#216fa6" stroke-width="1.3"></circle><text x="624" y="448" text-anchor="middle" class="op">⊕</text>
+      <path d="M399 441 H420" class="ab"></path><path d="M487 441 H508" class="ab"></path><path d="M586 441 H607" class="ab"></path>
+      <circle cx="312" cy="441" r="3.5" fill="#216fa6"></circle><path d="M312 441 V482 H607 V458" fill="none" stroke="#216fa6" stroke-width="1.3" marker-end="url(#vr-b)"></path><text x="465" y="500" text-anchor="middle" class="tiny">块输入残差旁路</text>
+      <rect x="329" y="514" width="325" height="22" fill="#eaf3f9"></rect><text x="491.5" y="529" text-anchor="middle" class="tiny">Temporal Block × M：局部变化、转向趋势与短期意图序列</text>
+    </g>
+
+    <!-- Stage 2: semantic encoder -->
+    <g>
+      <rect x="285" y="600" width="425" height="240" rx="4" fill="#ffffff" stroke="#72b8aa" stroke-width="1.5"></rect><rect x="285" y="600" width="425" height="42" rx="4" fill="#e7f4f1"></rect>
+      <text x="497.5" y="627" text-anchor="middle" class="group-title">冻结 Qwen 航次语义编码</text>
+      <rect x="316" y="677" width="132" height="105" rx="3" fill="#f4faf8" stroke="#0f8777" stroke-width="1.4"></rect><text x="382" y="706" text-anchor="middle" class="module-title">Qwen3-1.7B</text><text x="382" y="731" text-anchor="middle" class="note">冻结参数 · 离线预编码</text><text x="382" y="755" text-anchor="middle" class="tiny">不直接回归轨迹</text>
+      <rect x="491" y="666" width="186" height="127" rx="3" fill="#f4faf8" stroke="#0f8777" stroke-width="1.4"></rect><text x="584" y="693" text-anchor="middle" class="module-title">语义投影 MLP</text>
+      <rect x="510" y="718" width="34" height="28" rx="2" fill="#ffffff" stroke="#0f8777"></rect><text x="527" y="736" text-anchor="middle" class="tiny">LN</text>
+      <rect x="555" y="718" width="59" height="28" rx="2" fill="#ffffff" stroke="#0f8777"></rect><text x="584.5" y="736" text-anchor="middle" class="tiny">FC+GELU</text>
+      <rect x="625" y="718" width="34" height="28" rx="2" fill="#ffffff" stroke="#0f8777"></rect><text x="642" y="736" text-anchor="middle" class="tiny">FC</text>
+      <path d="M544 732 H555" class="at"></path><path d="M614 732 H625" class="at"></path><text x="584" y="770" text-anchor="middle" class="tiny">Dropout → LayerNorm</text>
+      <path d="M448 729.5 H491" class="at"></path><text x="470" y="716" text-anchor="middle" class="tensor">z<tspan baseline-shift="sub" font-size="8">q</tspan></text>
+    </g>
+
+    <!-- Stage 1 to 2 and dedicated inter-stage buses -->
+    <path d="M247 345 H285" class="ab"></path><path d="M285 345 H298 V272.5 H323" class="ab"></path><circle cx="298" cy="345" r="3.5" fill="#216fa6"></circle><path d="M298 345 V441 H323" class="ab"></path>
+    <path d="M247 675 H285" class="at"></path>
+    <path d="M669 272.5 H720 V118 H1382 V261" class="ab"></path>
+    <rect x="930" y="105" width="178" height="25" rx="2" fill="#ffffff"></rect><text x="1019" y="122" text-anchor="middle" class="tensor">全局轨迹特征 H<tspan baseline-shift="sub" font-size="9">g</tspan></text>
+    <text x="1348" y="250" text-anchor="middle" class="port-text">全局 H<tspan baseline-shift="sub" font-size="8">g</tspan></text>
+
+    <!-- H_l enters Stage 3 at one named port, then fans out inside the module. -->
+    <path d="M641 441 H752" class="ab"></path><rect x="648" y="413" width="100" height="20" rx="2" fill="#ffffff" stroke="#8db8d6" stroke-width="0.8"></rect><text x="698" y="427" text-anchor="middle" class="port-text">局部意图序列 H<tspan baseline-shift="sub" font-size="8">l</tspan></text>
+    <path d="M752 441 H758" fill="none" stroke="#216fa6" stroke-width="2"></path><circle cx="758" cy="441" r="4" fill="#216fa6"></circle>
+    <path d="M758 441 V272 H790" class="ab"></path><path d="M758 441 V721 H1004" class="ab"></path>
+    <rect x="918" y="706" width="75" height="18" rx="2" fill="#ffffff"></rect><text x="955.5" y="719" text-anchor="middle" class="port-text">H<tspan baseline-shift="sub" font-size="8">l</tspan> 局部主干</text>
+
+    <!-- z_sem uses a separate teal rail and explicitly feeds both gate calculation and gated content. -->
+    <path d="M659 732 H738 V330 H900" class="at"></path><rect x="651" y="703" width="93" height="20" rx="2" fill="#ffffff" stroke="#7bbcaf" stroke-width="0.8"></rect><text x="697.5" y="717" text-anchor="middle" class="port-text">语义向量 z<tspan baseline-shift="sub" font-size="8">sem</tspan></text>
+    <circle cx="900" cy="330" r="4" fill="#0f8777"></circle><rect x="907" y="306" width="59" height="17" rx="2" fill="#ffffff"></rect><text x="936.5" y="318" text-anchor="middle" class="tiny">门控计算</text><rect x="1041" y="334" width="59" height="17" rx="2" fill="#ffffff"></rect><text x="1070.5" y="346" text-anchor="middle" class="tiny">受控语义</text>
+
+    <!-- Stage 3 -->
+    <g>
+      <rect x="750" y="140" width="540" height="700" rx="4" fill="#ffffff" stroke="#75aa80" stroke-width="1.6"></rect><rect x="750" y="140" width="540" height="42" rx="4" fill="#e9f4eb"></rect>
+      <text x="1020" y="167" text-anchor="middle" class="group-title">语义增强的层级航路意图模块</text>
+
+      <!-- I1 corrected gated fusion -->
+      <rect x="770" y="205" width="500" height="150" rx="3" fill="#f7fbf8" stroke="#37804d" stroke-width="1.3"></rect><text x="786" y="228" class="module-title">I1  运动—语义门控融合</text>
+      <rect x="790" y="248" width="105" height="48" rx="2" fill="#ffffff" stroke="#37804d"></rect><text x="842.5" y="267" text-anchor="middle" class="tiny">Intent Summary</text><text x="842.5" y="284" text-anchor="middle" class="tiny">[Mean, Last, Δ]</text>
+      <rect x="925" y="248" width="50" height="48" rx="2" fill="#ffffff" stroke="#37804d"></rect><text x="950" y="277" text-anchor="middle" class="module-title">Concat</text>
+      <rect x="1001" y="240" width="105" height="64" rx="2" fill="#ffffff" stroke="#37804d"></rect><text x="1053.5" y="262" text-anchor="middle" class="tiny">Linear</text><text x="1053.5" y="280" text-anchor="middle" class="tiny">Sigmoid gate</text><text x="1053.5" y="298" text-anchor="middle" class="tensor">g<tspan baseline-shift="sub" font-size="8">s</tspan></text>
+      <circle cx="1140" cy="272" r="18" fill="#ffffff" stroke="#37804d" stroke-width="1.4"></circle><text x="1140" y="279" text-anchor="middle" class="op">⊗</text>
+      <circle cx="1215" cy="272" r="18" fill="#ffffff" stroke="#37804d" stroke-width="1.4"></circle><text x="1215" y="279" text-anchor="middle" class="op">⊕</text>
+      <path d="M895 272 H925" class="ag"></path><path d="M975 272 H1001" class="ag"></path><path d="M1106 272 H1122" class="ag"></path><path d="M1158 272 H1197" class="ag"></path>
+      <path d="M842.5 248 V236 H1215 V254" fill="none" stroke="#37804d" stroke-width="1.3" marker-end="url(#vr-g)"></path><text x="1085" y="230" text-anchor="middle" class="tiny">h<tspan baseline-shift="sub" font-size="8">l</tspan> 残差</text>
+      <path d="M900 330 H950 V296" class="at"></path><path d="M900 330 H1140 V290" fill="none" stroke="#0f8777" stroke-width="1.3" marker-end="url(#vr-t)"></path><text x="878" y="323" text-anchor="middle" class="tensor" style="fill:#0f8777">z<tspan baseline-shift="sub" font-size="8">sem</tspan></text>
+      <text x="1177" y="260" text-anchor="middle" class="tiny">λ<tspan baseline-shift="sub" font-size="8">s</tspan>=0.25</text><path d="M1233 272 H1258" class="ag"></path><circle cx="1258" cy="272" r="3.5" fill="#37804d"></circle><text x="1247" y="258" text-anchor="middle" class="tensor">h<tspan baseline-shift="sub" font-size="8">f</tspan></text>
+
+      <!-- I2/I3 corrected parallel intent flow -->
+      <rect x="770" y="375" width="500" height="210" rx="3" fill="#f7fbf8" stroke="#37804d" stroke-width="1.3"></rect><text x="786" y="398" class="module-title">I2–I3  层级航路意图推断</text>
+      <rect x="795" y="415" width="130" height="48" rx="2" fill="#ffffff" stroke="#37804d"></rect><text x="860" y="434" text-anchor="middle" class="tiny">主航路 Head<tspan baseline-shift="sub" font-size="8">r</tspan></text><text x="860" y="452" text-anchor="middle" class="tiny">+ 可判别性 Head</text>
+      <rect x="945" y="415" width="145" height="48" rx="2" fill="#ffffff" stroke="#0f8777"></rect><text x="1017.5" y="434" text-anchor="middle" class="tiny">主航路 Logit 融合</text><text x="1017.5" y="452" text-anchor="middle" class="tiny">语义残差 + 几何原型</text>
+      <rect x="1110" y="415" width="140" height="48" rx="2" fill="#edf7ef" stroke="#37804d"></rect><text x="1180" y="434" text-anchor="middle" class="tiny">置信度感知路由</text><text x="1180" y="452" text-anchor="middle" class="tensor">p̂<tspan baseline-shift="sub" font-size="8">r</tspan></text>
+      <path d="M925 439 H945" class="ag"></path><path d="M1090 439 H1110" class="ag"></path>
+
+      <rect x="795" y="489" width="130" height="48" rx="2" fill="#ffffff" stroke="#37804d"></rect><text x="860" y="508" text-anchor="middle" class="tiny">子航路 Head<tspan baseline-shift="sub" font-size="8">s</tspan></text><text x="860" y="526" text-anchor="middle" class="tiny">+ 可判别性 Head</text>
+      <rect x="945" y="489" width="145" height="48" rx="2" fill="#ffffff" stroke="#0f8777"></rect><text x="1017.5" y="508" text-anchor="middle" class="tiny">子航路 Logit 融合</text><text x="1017.5" y="526" text-anchor="middle" class="tiny">语义 + 未来意图 + 原型</text>
+      <rect x="1110" y="489" width="70" height="48" rx="2" fill="#ffffff" stroke="#37804d"></rect><text x="1145" y="508" text-anchor="middle" class="tiny">层级约束</text><text x="1145" y="526" text-anchor="middle" class="tiny">p̂<tspan baseline-shift="sub" font-size="8">r</tspan> → sub</text>
+      <rect x="1200" y="489" width="50" height="48" rx="2" fill="#edf7ef" stroke="#37804d"></rect><text x="1225" y="508" text-anchor="middle" class="tiny">路由</text><text x="1225" y="526" text-anchor="middle" class="tensor">p̂<tspan baseline-shift="sub" font-size="8">s</tspan></text>
+      <path d="M925 513 H945" class="ag"></path><path d="M1090 513 H1110" class="ag"></path><path d="M1180 463 V477 H1145 V489" class="ag"></path><path d="M1180 513 H1200" class="ag"></path>
+      <rect x="815" y="553" width="410" height="22" fill="#eaf5ed"></rect><text x="1020" y="568" text-anchor="middle" class="tiny">高置信度 Top-1 · 低置信度 Top-2 · 学习型可判别性调节层级强度</text>
+
+      <!-- I4 corrected embedding feedback -->
+      <rect x="770" y="610" width="500" height="202" rx="3" fill="#eef7f0" stroke="#37804d" stroke-width="1.3"></rect><text x="786" y="633" class="module-title">I4  航路嵌入反馈</text>
+      <rect x="820" y="664" width="150" height="34" rx="2" fill="#ffffff" stroke="#37804d"></rect><text x="895" y="685" text-anchor="middle" class="tiny">p̂<tspan baseline-shift="sub" font-size="8">r</tspan> → Route Embedding → FC</text>
+      <rect x="820" y="744" width="150" height="34" rx="2" fill="#ffffff" stroke="#37804d"></rect><text x="895" y="765" text-anchor="middle" class="tiny">p̂<tspan baseline-shift="sub" font-size="8">s</tspan> → Subroute Embedding → FC</text>
+      <circle cx="1020" cy="721" r="16" fill="#ffffff" stroke="#37804d" stroke-width="1.3"></circle><text x="1020" y="728" text-anchor="middle" class="op">⊕</text>
+      <rect x="1048" y="700" width="162" height="42" rx="2" fill="#edf7ef" stroke="#37804d"></rect><text x="1129" y="717" text-anchor="middle" class="tiny">+ H<tspan baseline-shift="sub" font-size="8">l</tspan></text><text x="1129" y="735" text-anchor="middle" class="tensor">H<tspan baseline-shift="sub" font-size="8">l</tspan><tspan baseline-shift="super" font-size="8">route</tspan></text>
+      <path d="M970 681 H1020 V705" class="ag"></path><path d="M970 761 H1020 V737" class="ag"></path><path d="M1036 721 H1048" class="ag"></path>
+    </g>
+
+    <!-- Explicit I1 -> I2/I3 interface: h_f leaves the fusion block, enters a named port, then fans out to both heads. -->
+    <path d="M1258 272 H1280 V364 H1120" class="ag"></path>
+    <rect x="970" y="353" width="150" height="22" rx="2" fill="#ffffff" stroke="#37804d" stroke-width="1"></rect><text x="1045" y="368" text-anchor="middle" class="port-text">I1 → I2/I3：融合特征 h<tspan baseline-shift="sub" font-size="8">f</tspan></text>
+    <path d="M970 364 H780 V439 H795" class="ag"></path><circle cx="780" cy="439" r="3.5" fill="#37804d"></circle>
+    <path d="M780 439 V513 H795" class="ag"></path>
+
+    <!-- Explicit probability feedback and bundled selector-evidence bus -->
+    <path d="M1180 463 H1190 V650 H895 V664" class="ag"></path><path d="M1225 537 V790 H895 V778" class="ag"></path>
+    <rect x="1138" y="639" width="45" height="17" rx="2" fill="#ffffff"></rect><text x="1160.5" y="651" text-anchor="middle" class="port-text">p̂<tspan baseline-shift="sub" font-size="8">r</tspan></text><rect x="1138" y="779" width="45" height="17" rx="2" fill="#ffffff"></rect><text x="1160.5" y="791" text-anchor="middle" class="port-text">p̂<tspan baseline-shift="sub" font-size="8">s</tspan></text>
+
+    <!-- Stage 3 to 4 clean bus -->
+    <path d="M1210 721 H1300 V285 H1360" class="ag"></path>
+    <text x="1307" y="278" class="port-text" fill="#37804d">局部 H<tspan baseline-shift="sub" font-size="8">l</tspan><tspan baseline-shift="super" font-size="8">route</tspan></text>
+
+    <!-- Stage 4 -->
+    <g>
+      <rect x="1320" y="140" width="390" height="700" rx="4" fill="#ffffff" stroke="#d0a05f" stroke-width="1.6"></rect><rect x="1320" y="140" width="390" height="42" rx="4" fill="#fff1df"></rect>
+      <text x="1515" y="167" text-anchor="middle" class="group-title">航路条件多候选轨迹生成模块</text>
+
+      <rect x="1340" y="205" width="350" height="156" rx="3" fill="#fffaf4" stroke="#bf741b" stroke-width="1.3"></rect><text x="1356" y="228" class="module-title">G1  特征融合块 Fusion Block</text>
+      <rect x="1360" y="261" width="50" height="48" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1385" y="290" text-anchor="middle" class="module-title">Concat</text>
+      <rect x="1433" y="250" width="31" height="24" rx="2" fill="#ffe8c9" stroke="#bf741b"></rect><text x="1448.5" y="267" text-anchor="middle" class="tiny">Q</text><rect x="1433" y="279" width="31" height="24" rx="2" fill="#ffe8c9" stroke="#bf741b"></rect><text x="1448.5" y="296" text-anchor="middle" class="tiny">K</text><rect x="1433" y="308" width="31" height="24" rx="2" fill="#ffe8c9" stroke="#bf741b"></rect><text x="1448.5" y="325" text-anchor="middle" class="tiny">V</text>
+      <rect x="1491" y="266" width="86" height="48" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1534" y="285" text-anchor="middle" class="module-title">Multi-Head</text><text x="1534" y="303" text-anchor="middle" class="tiny">Attention</text>
+      <circle cx="1608" cy="290" r="17" fill="#ffffff" stroke="#bf741b" stroke-width="1.3"></circle><text x="1608" y="297" text-anchor="middle" class="op">⊕</text>
+      <rect x="1641" y="269" width="34" height="42" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1658" y="286" text-anchor="middle" class="tiny">Layer</text><text x="1658" y="302" text-anchor="middle" class="tiny">Norm</text>
+      <path d="M1410 285 H1433" class="ao"></path><path d="M1464 262 H1477 V290 H1491" class="ao"></path><path d="M1464 291 H1491" class="ao"></path><path d="M1464 320 H1477 V290 H1491" class="ao"></path><path d="M1577 290 H1591" class="ao"></path><path d="M1625 290 H1641" class="ao"></path>
+      <text x="1515" y="345" text-anchor="middle" class="tiny">QK<tspan baseline-shift="super" font-size="8">T</tspan>/√d → Softmax → V + Residual</text>
+
+      <rect x="1340" y="390" width="350" height="94" rx="3" fill="#fffaf4" stroke="#bf741b" stroke-width="1.3"></rect><text x="1356" y="413" class="module-title">G2  共享轨迹解码器</text>
+      <rect x="1370" y="435" width="58" height="30" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1399" y="454" text-anchor="middle" class="tiny">FC</text><rect x="1451" y="435" width="67" height="30" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1484.5" y="454" text-anchor="middle" class="tiny">Flatten</text><rect x="1541" y="435" width="58" height="30" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1570" y="454" text-anchor="middle" class="tiny">FC</text><rect x="1622" y="435" width="50" height="30" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1647" y="454" text-anchor="middle" class="tiny">Reshape</text>
+      <path d="M1428 450 H1451" class="ao"></path><path d="M1518 450 H1541" class="ao"></path><path d="M1599 450 H1622" class="ao"></path>
+
+      <rect x="1340" y="515" width="350" height="145" rx="3" fill="#fffaf4" stroke="#bf741b" stroke-width="1.3"></rect><text x="1356" y="538" class="module-title">G3  子航路残差专家库</text>
+      <rect x="1361" y="558" width="98" height="27" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1410" y="576" text-anchor="middle" class="tiny">Expert OA-S00</text><rect x="1361" y="592" width="98" height="27" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1410" y="610" text-anchor="middle" class="tiny">Expert OA-S01</text><rect x="1361" y="626" width="98" height="27" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1410" y="644" text-anchor="middle" class="tiny">··· Expert S</text>
+      <rect x="1490" y="570" width="95" height="66" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1537.5" y="589" text-anchor="middle" class="tiny">LN → FC</text><text x="1537.5" y="606" text-anchor="middle" class="tiny">GELU → FC</text><text x="1537.5" y="623" text-anchor="middle" class="tiny">零初始化输出层</text>
+      <circle cx="1631" cy="603" r="20" fill="#ffffff" stroke="#bf741b" stroke-width="1.3"></circle><text x="1631" y="610" text-anchor="middle" class="op">Σ</text><text x="1631" y="636" text-anchor="middle" class="tiny">按 I2 的 p̂<tspan baseline-shift="sub" font-size="8">s</tspan> 加权</text>
+      <path d="M1459 571.5 H1490" class="ao"></path><path d="M1459 605.5 H1490" class="ao"></path><path d="M1459 639.5 H1475 V603 H1490" class="ao"></path><path d="M1585 603 H1611" class="ao"></path>
+
+      <rect x="1340" y="690" width="350" height="125" rx="3" fill="#fff6ea" stroke="#bf741b" stroke-width="1.3"></rect><text x="1356" y="713" class="module-title">G4  残差组合与绝对轨迹恢复</text>
+      <rect x="1361" y="730" width="88" height="29" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1405" y="749" text-anchor="middle" class="tiny">共享预测 ΔY<tspan baseline-shift="sub" font-size="8">sh</tspan></text><rect x="1361" y="773" width="88" height="29" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1405" y="792" text-anchor="middle" class="tiny">专家修正 ΔY<tspan baseline-shift="sub" font-size="8">exp</tspan></text>
+      <circle cx="1480" cy="766" r="17" fill="#ffffff" stroke="#bf741b" stroke-width="1.3"></circle><text x="1480" y="773" text-anchor="middle" class="op">⊕</text><rect x="1512" y="750" width="78" height="32" rx="2" fill="#ffffff" stroke="#bf741b"></rect><text x="1551" y="770" text-anchor="middle" class="tiny">神经残差 ΔY</text><circle cx="1622" cy="766" r="17" fill="#ffffff" stroke="#bf741b" stroke-width="1.3"></circle><text x="1622" y="773" text-anchor="middle" class="op">⊕</text>
+      <rect x="1512" y="790" width="78" height="25" rx="2" fill="#ffffff" stroke="#8c969e"></rect><text x="1551" y="807" text-anchor="middle" class="tiny">Y<tspan baseline-shift="sub" font-size="8">linear</tspan></text>
+      <path d="M1449 744.5 H1463 V766" class="ao"></path><path d="M1449 787.5 H1463 V766" class="ao"></path><path d="M1497 766 H1512" class="ao"></path><path d="M1590 766 H1605" class="ao"></path><path d="M1590 802.5 H1622 V783" fill="none" stroke="#7a858d" stroke-width="1.2" marker-end="url(#vr-x)"></path>
+      <path d="M1639 766 H1690" class="ao"></path>
+    </g>
+    <path d="M1658 311 V375 H1328 V450 H1370" class="ao"></path><rect x="1340" y="363" width="82" height="18" rx="2" fill="#ffffff"></rect><text x="1381" y="376" text-anchor="middle" class="port-text">融合特征 F<tspan baseline-shift="sub" font-size="8">fuse</tspan></text>
+    <circle cx="1300" cy="500" r="3.5" fill="#37804d"></circle><path d="M1300 500 H1348 V639" fill="none" stroke="#37804d" stroke-width="1.5"></path><path d="M1348 571.5 H1361" class="ag"></path><path d="M1348 605.5 H1361" class="ag"></path><path d="M1348 639.5 H1361" class="ag"></path>
+    <rect x="1307" y="544" width="51" height="17" rx="2" fill="#ffffff"></rect><text x="1332.5" y="556" text-anchor="middle" class="tiny">意图条件</text>
+    <path d="M1672 450 H1698 V682 H1405 V730" class="ao"></path><rect x="1607" y="671" width="66" height="18" rx="2" fill="#ffffff"></rect><text x="1640" y="684" text-anchor="middle" class="port-text">共享残差</text>
+    <path d="M1631 623 V655 H1330 V787 H1361" class="ao"></path><rect x="1452" y="644" width="66" height="18" rx="2" fill="#ffffff"></rect><text x="1485" y="657" text-anchor="middle" class="port-text">专家修正</text>
+
+    <!-- Stage 5 -->
+    <g>
+      <rect x="1730" y="140" width="288" height="700" rx="4" fill="#ffffff" stroke="#929da5" stroke-width="1.6"></rect><rect x="1730" y="140" width="288" height="42" rx="4" fill="#eef1f3"></rect>
+      <text x="1874" y="167" text-anchor="middle" class="group-title">学习型候选选择器</text>
+      <rect x="1750" y="205" width="248" height="280" rx="3" fill="#f8f9fa" stroke="#65727c" stroke-width="1.3"></rect><text x="1766" y="228" class="module-title">C1  候选证据构建</text>
+      <rect x="1768" y="248" width="83" height="34" rx="2" fill="#ffffff" stroke="#8b959d"></rect><text x="1809.5" y="261" text-anchor="middle" class="tiny">log p<tspan baseline-shift="sub" font-size="8">r</tspan></text><text x="1809.5" y="276" text-anchor="middle" class="tiny">来自 I2 主路由</text><rect x="1897" y="248" width="83" height="34" rx="2" fill="#ffffff" stroke="#8b959d"></rect><text x="1938.5" y="261" text-anchor="middle" class="tiny">log p<tspan baseline-shift="sub" font-size="8">s</tspan></text><text x="1938.5" y="276" text-anchor="middle" class="tiny">来自 I2 子路由</text>
+      <rect x="1768" y="294" width="83" height="32" rx="2" fill="#ffffff" stroke="#8b959d"></rect><text x="1809.5" y="307" text-anchor="middle" class="tiny">−C<tspan baseline-shift="sub" font-size="8">continuity</tspan></text><text x="1809.5" y="321" text-anchor="middle" class="tiny">候选轨迹</text><rect x="1897" y="294" width="83" height="32" rx="2" fill="#ffffff" stroke="#8b959d"></rect><text x="1938.5" y="307" text-anchor="middle" class="tiny">−C<tspan baseline-shift="sub" font-size="8">smooth</tspan></text><text x="1938.5" y="321" text-anchor="middle" class="tiny">候选轨迹</text>
+      <rect x="1768" y="338" width="83" height="32" rx="2" fill="#ffffff" stroke="#8b959d"></rect><text x="1809.5" y="351" text-anchor="middle" class="tiny">−D<tspan baseline-shift="sub" font-size="8">proto</tspan></text><text x="1809.5" y="365" text-anchor="middle" class="tiny">候选/原型</text><rect x="1897" y="338" width="83" height="32" rx="2" fill="#ffffff" stroke="#8b959d"></rect><text x="1938.5" y="351" text-anchor="middle" class="tiny">base flag</text><text x="1938.5" y="365" text-anchor="middle" class="tiny">基础分支ID</text>
+      <rect x="1768" y="382" width="212" height="40" rx="2" fill="#ffffff" stroke="#8b959d"></rect><text x="1874" y="397" text-anchor="middle" class="tiny">[h<tspan baseline-shift="sub" font-size="8">f</tspan>; E<tspan baseline-shift="sub" font-size="8">r</tspan>; E<tspan baseline-shift="sub" font-size="8">s</tspan>]</text><text x="1874" y="414" text-anchor="middle" class="tiny">来源：I1 融合特征 + I4 航路嵌入</text>
+      <rect x="1819" y="440" width="110" height="27" rx="2" fill="#ffffff" stroke="#65727c"></rect><text x="1874" y="458" text-anchor="middle" class="module-title">Concat</text>
+
+      <rect x="1750" y="515" width="248" height="102" rx="3" fill="#f8f9fa" stroke="#65727c" stroke-width="1.3"></rect><text x="1766" y="538" class="module-title">C2  候选评分</text>
+      <rect x="1771" y="558" width="140" height="39" rx="2" fill="#ffffff" stroke="#65727c"></rect><text x="1841" y="574" text-anchor="middle" class="tiny">LN → FC → ReLU</text><text x="1841" y="590" text-anchor="middle" class="tiny">Dropout → FC</text><circle cx="1948" cy="577.5" r="16" fill="#ffffff" stroke="#65727c" stroke-width="1.3"></circle><text x="1948" y="584" text-anchor="middle" class="op">⊕</text><text x="1948" y="608" text-anchor="middle" class="tiny">概率先验</text><path d="M1911 577.5 H1932" class="ax"></path>
+
+      <rect x="1750" y="646" width="248" height="72" rx="3" fill="#f8f9fa" stroke="#65727c" stroke-width="1.3"></rect><text x="1766" y="669" class="module-title">C3  验证集阈值校准</text><text x="1874" y="697" text-anchor="middle" class="note">基础预测 / 最优分支阈值切换 → Top-1</text>
+      <rect x="1750" y="752" width="248" height="68" rx="3" fill="#f2f5f7" stroke="#65727c" stroke-width="1.6"></rect><text x="1874" y="776" text-anchor="middle" class="tensor">Ŷ<tspan baseline-shift="super" font-size="8">Top-1</tspan></text><text x="1874" y="800" text-anchor="middle" class="group-title">未来3小时 · 12点</text>
+      <path d="M1874 485 V515" class="ax"></path><path d="M1874 617 V646" class="ax"></path><path d="M1874 718 V752" class="ax"></path>
+    </g>
+
+    <!-- Inter-stage interfaces are redrawn above destination panels so every arrowhead reaches a visible input. -->
+    <g id="visible-inter-stage-interfaces">
+      <!-- Stage 2 global branch -> G1 global input -->
+      <path d="M669 272.5 H720 V118 H1382 V261" class="ab"></path>
+      <rect x="930" y="105" width="178" height="25" rx="2" fill="#ffffff"></rect><text x="1019" y="122" text-anchor="middle" class="tensor">全局轨迹特征 H<tspan baseline-shift="sub" font-size="9">g</tspan></text>
+      <rect x="1317" y="237" width="58" height="18" rx="2" fill="#ffffff"></rect><text x="1346" y="250" text-anchor="middle" class="port-text">全局 H<tspan baseline-shift="sub" font-size="8">g</tspan></text>
+
+      <!-- Stage 2 local branch -> Stage 3 input port -> intent summary / route feedback -->
+      <path d="M641 441 H752" class="ab"></path><rect x="648" y="413" width="100" height="20" rx="2" fill="#ffffff" stroke="#8db8d6" stroke-width="0.8"></rect><text x="698" y="427" text-anchor="middle" class="port-text">局部意图序列 H<tspan baseline-shift="sub" font-size="8">l</tspan></text>
+      <path d="M752 441 H758" fill="none" stroke="#216fa6" stroke-width="2"></path><circle cx="758" cy="441" r="4" fill="#216fa6"></circle>
+      <path d="M758 441 V272 H790" class="ab"></path><path d="M758 441 V721 H1004" class="ab"></path>
+      <rect x="918" y="706" width="75" height="18" rx="2" fill="#ffffff"></rect><text x="955.5" y="719" text-anchor="middle" class="port-text">H<tspan baseline-shift="sub" font-size="8">l</tspan> 局部主干</text>
+
+      <!-- Stage 2 semantic branch -> I1 semantic split -->
+      <path d="M659 732 H738 V330 H900" class="at"></path><rect x="651" y="703" width="93" height="20" rx="2" fill="#ffffff" stroke="#7bbcaf" stroke-width="0.8"></rect><text x="697.5" y="717" text-anchor="middle" class="port-text">语义向量 z<tspan baseline-shift="sub" font-size="8">sem</tspan></text><circle cx="900" cy="330" r="4" fill="#0f8777"></circle>
+
+      <!-- Stage 3 route-conditioned local feature -> G1 local input -->
+      <path d="M1210 721 H1300 V285 H1360" class="ag"></path><rect x="1298" y="263" width="60" height="18" rx="2" fill="#ffffff"></rect><text x="1328" y="276" text-anchor="middle" class="port-text">局部 H<tspan baseline-shift="sub" font-size="8">l</tspan><tspan baseline-shift="super" font-size="8">route</tspan></text><circle cx="1300" cy="500" r="3.5" fill="#37804d"></circle>
+
+    </g>
+    <path d="M1690 766 H1712 V231 H1862" class="ao"></path><rect x="1862" y="214" width="118" height="31" rx="2" fill="#ffffff" stroke="#d7a66b" stroke-width="0.8"></rect><text x="1921" y="227" text-anchor="middle" class="port-text">候选轨迹池</text><text x="1921" y="240" text-anchor="middle" class="tensor">{Ŷ<tspan baseline-shift="super" font-size="8">(k)</tspan>}</text>
+
+    <!-- Training band -->
+    <g>
+      <rect x="30" y="910" width="1988" height="205" rx="4" fill="#fbfbfb" stroke="#c7cdd2" stroke-width="1.3"></rect>
+      <text x="48" y="940" class="group-title">联合训练目标（红色虚线仅训练，推理阶段移除）</text>
+      <g transform="translate(48 960)"><rect x="0" y="0" width="45" height="24" fill="#ffffff" stroke="#596873" stroke-width="1.4"></rect><text x="56" y="16" class="tiny">模型组件</text><circle cx="150" cy="12" r="11" fill="#ffffff" stroke="#596873"></circle><text x="150" y="17" text-anchor="middle" class="module-title">⊕</text><text x="170" y="16" class="tiny">算子</text><rect x="223" y="0" width="45" height="24" fill="#fffafa" stroke="#982e39" stroke-dasharray="7 5"></rect><text x="280" y="16" class="tiny">训练专用</text></g>
+
+      <rect x="285" y="1020" width="425" height="64" rx="3" fill="#f7f8f9" stroke="#6d7780" stroke-width="1.4" stroke-dasharray="7 5"></rect><text x="497.5" y="1045" text-anchor="middle" class="module-title">小类均衡辅助意图流</text><text x="497.5" y="1068" text-anchor="middle" class="note">只增强航路分类与意图表示，不改变自然分布轨迹回归主流</text>
+      <rect x="750" y="1003" width="540" height="82" rx="3" fill="#fffafa" stroke="#982e39" stroke-width="1.5" stroke-dasharray="8 6"></rect><text x="1020" y="1029" text-anchor="middle" class="loss">L<tspan baseline-shift="sub" font-size="9">intent</tspan> = L<tspan baseline-shift="sub" font-size="9">route</tspan> + L<tspan baseline-shift="sub" font-size="9">focal-sub</tspan> + L<tspan baseline-shift="sub" font-size="9">dec</tspan> + L<tspan baseline-shift="sub" font-size="9">con</tspan> + L<tspan baseline-shift="sub" font-size="9">future</tspan></text><text x="1020" y="1054" text-anchor="middle" class="note">主/子航路标签 · 可判别性 · 监督对比 · 未来意图对齐</text><text x="1020" y="1075" text-anchor="middle" class="tiny">真实未来编码器仅在训练阶段使用</text>
+      <rect x="1320" y="1003" width="390" height="82" rx="3" fill="#fffafa" stroke="#982e39" stroke-width="1.5" stroke-dasharray="8 6"></rect><text x="1515" y="1029" text-anchor="middle" class="loss">L<tspan baseline-shift="sub" font-size="9">traj</tspan> = L<tspan baseline-shift="sub" font-size="9">reg</tspan> + L<tspan baseline-shift="sub" font-size="9">geo</tspan> + L<tspan baseline-shift="sub" font-size="9">FDE</tspan> + L<tspan baseline-shift="sub" font-size="9">smooth</tspan> + L<tspan baseline-shift="sub" font-size="9">COG</tspan></text><text x="1515" y="1057" text-anchor="middle" class="note">真实未来轨迹监督共享解码器与残差专家</text>
+      <rect x="1730" y="1003" width="288" height="82" rx="3" fill="#fffafa" stroke="#982e39" stroke-width="1.5" stroke-dasharray="8 6"></rect><text x="1874" y="1029" text-anchor="middle" class="loss">候选排序与回归损失</text><text x="1874" y="1057" text-anchor="middle" class="note">候选代价与Top-1选择</text>
+      <path d="M710 1052 H730 V820 H750" class="aa"></path><path d="M1020 1003 V840" class="ar"></path><path d="M1515 1003 V840" class="ar"></path><path d="M1874 1003 V840" class="ar"></path>
+    </g>
+  </svg>
